@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "avpo"
+version = "0.1.0"
+description = "AI 视频工作流操作系统 —— 连接剧本、AI 生成模型与剪映的智能中间层"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic==2.13.4",
+    "edge-tts==7.2.8",
+    "openai==3.2.0",
+    "typer==0.27.1",
+    "mutagen==1.48.1",
+    "pyJianYingDraft==0.3.0",
+]
+
+[project.scripts]
+avpo = "app.cli:app"
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+
+[tool.setuptools]
+packages = ["app", "app.core", "app.director", "app.tts", "app.vision", "app.timeline", "app.export"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
