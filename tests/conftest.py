@@ -1,16 +1,29 @@
 """测试公共设施。
 
-本机约定：测试临时文件一律放 F 盘，不污染 C 盘。
+临时目录约定：优先 F 盘（本机免 C 盘污染），不可用则退回系统临时目录。
 必须在任何临时目录被使用之前设置 —— tempfile 优先读 TMP/TEMP 环境变量。
 """
 
 import os
+import tempfile
 from pathlib import Path
 
-_F_TMP = Path("F:/tmp/avpo-pytest")
-_F_TMP.mkdir(parents=True, exist_ok=True)
-os.environ["TMP"] = str(_F_TMP)
-os.environ["TEMP"] = str(_F_TMP)
+
+def _pick_tmp_root() -> Path:
+    for candidate in (Path("F:/tmp/avpo-pytest"),):
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        except OSError:
+            continue
+    fallback = Path(tempfile.gettempdir()) / "avpo-pytest"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+_TMP_ROOT = _pick_tmp_root()
+os.environ["TMP"] = str(_TMP_ROOT)
+os.environ["TEMP"] = str(_TMP_ROOT)
 
 import pytest  # noqa: E402
 
