@@ -49,19 +49,25 @@ def test_status_missing_project_exits_1(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------- M1-2.8 CLI 命令
 
+def _raise_missing_key(config):
+    raise KeyError("缺少 DASHSCOPE_API_KEY：请在项目根 .env 配置（模板见 .env.example）")
+
+
 def test_direct_missing_key_exits_1(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("app.cli._load_env", lambda: None)      # 无 .env 密钥
+    monkeypatch.setattr("app.cli._load_env", lambda: None)
+    monkeypatch.setattr("app.cli.make_director", _raise_missing_key)
     app = create_app(tmp_path / "data")
     runner = CliRunner()
     runner.invoke(app, ["new", "proj_001"])
 
     result = runner.invoke(app, ["direct", "proj_001", "--text", "你好。"])
     assert result.exit_code == 1
-    assert "SILICONFLOW_API_KEY" in result.output
+    assert "DASHSCOPE_API_KEY" in result.output
 
 
 def test_direct_runs_with_key(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("app.cli._load_env", lambda: "sk-test")
+    monkeypatch.setattr("app.cli._load_env", lambda: None)
+    monkeypatch.setattr("app.cli.make_director", lambda config: None)
     # 假 run_direct：不动真实 LLM API
     monkeypatch.setattr("app.cli.run_direct", lambda store, p, d, text: True)
     app = create_app(tmp_path / "data")
@@ -75,17 +81,19 @@ def test_direct_runs_with_key(tmp_path: Path, monkeypatch) -> None:
 
 def test_gen_assets_missing_key_exits_1(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("app.cli._load_env", lambda: None)
+    monkeypatch.setattr("app.cli.make_image", _raise_missing_key)
     app = create_app(tmp_path / "data")
     runner = CliRunner()
     runner.invoke(app, ["new", "proj_001"])
 
     result = runner.invoke(app, ["gen-assets", "proj_001"])
     assert result.exit_code == 1
-    assert "SILICONFLOW_API_KEY" in result.output
+    assert "DASHSCOPE_API_KEY" in result.output
 
 
 def test_gen_assets_runs_with_key(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("app.cli._load_env", lambda: "sk-test")
+    monkeypatch.setattr("app.cli._load_env", lambda: None)
+    monkeypatch.setattr("app.cli.make_image", lambda config: None)
     monkeypatch.setattr("app.cli.run_gen_assets", lambda store, p, tts, image: True)
     app = create_app(tmp_path / "data")
     runner = CliRunner()
@@ -94,3 +102,21 @@ def test_gen_assets_runs_with_key(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(app, ["gen-assets", "proj_001"])
     assert result.exit_code == 0, result.output
     assert "gen_assets 完成" in result.output
+
+
+def test_new_with_dashscope_provider(tmp_path: Path) -> None:
+    app = create_app(tmp_path / "data")
+    runner = CliRunner()
+    result = runner.invoke(app, ["new", "proj_002", "--provider", "dashscope"])
+    assert result.exit_code == 0, result.output
+
+    project = ProjectStore(tmp_path / "data").load("proj_002")
+    assert project.config.llm.provider == "dashscope"
+    assert project.config.llm.model == "qwen-plus"
+    assert project.config.image.model == "wanx2.1-t2i-turbo"
+
+
+def test_new_unknown_provider_exits_1(tmp_path: Path) -> None:
+    app = create_app(tmp_path / "data")
+    result = CliRunner().invoke(app, ["new", "proj_003", "--provider", "openai"])
+    assert result.exit_code == 1

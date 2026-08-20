@@ -17,10 +17,9 @@ from rich.tree import Tree
 
 from app.core.pipeline import run_direct, run_gen_assets
 from app.core.project import ProjectStore
+from app.core.providers import config_for_provider, make_director, make_image
 from app.core.schema import Project
-from app.director.director import Director
 from app.tts.tts_edge import EdgeTTS
-from app.vision.flux import FluxImage
 
 console = Console()
 
@@ -28,20 +27,11 @@ console = Console()
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 
-def _load_env() -> str | None:
-    """加载项目根 .env（不存在则跳过），返回 SiliconFlow API key（可能为 None）。"""
+def _load_env() -> None:
+    """加载项目根 .env（不存在则跳过），把渠道 key/base_url 注入环境变量。"""
     env_path = Path(__file__).resolve().parents[1] / ".env"
     if env_path.is_file():
         load_dotenv(env_path)
-    return os.environ.get("SILICONFLOW_API_KEY")
-
-
-def _require_key() -> str:
-    key = _load_env()
-    if not key:
-        console.print("[red]缺少 SILICONFLOW_API_KEY：请在项目根 .env 配置（模板见 .env.example）[/red]")
-        raise typer.Exit(code=1)
-    return key
 
 
 def _load_project_or_exit(store: ProjectStore, project_id: str) -> Project:
@@ -61,10 +51,16 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         project_id: str = typer.Argument(..., help="项目 ID，如 proj_001"),
         title: str = typer.Option("", "--title", "-t", help="项目标题"),
         voice: str = typer.Option("zh-CN-YunxiNeural", "--voice", help="TTS 音色"),
+        provider: str = typer.Option("siliconflow", "--provider", help="LLM/生图渠道: siliconflow | dashscope"),
     ) -> None:
         """创建新项目：生成带默认配置的 project.json 并 git 提交。"""
         store.init_repo()
-        project = Project(project_id=project_id, title=title or project_id)
+        try:
+            config = config_for_provider(provider)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+        project = Project(project_id=project_id, title=title or project_id, config=config)
         project.config.tts.voice = voice
         try:
             store.create(project)
@@ -128,15 +124,16 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         project_id: str = typer.Argument(..., help="项目 ID"),
     ) -> None:
         """gen_assets 节点：逐场景生成配音段 + 字幕 + 图（prompt_hash 缓存），归档入 assets/。"""
-        key = _require_key()
+        _load_env()
         store.init_repo()
         project = _load_project_or_exit(store, project_id)
+        try:
+            image = make_image(project.config.image)
+        except KeyError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
 
-        ok = run_gen_assets(
-            store, project,
-            tts=EdgeTTS(project.config.tts),
-            image=FluxImage(api_key=key, base_url=os.environ.get("SILICONFLOW_BASE_URL")),
-        )
+        ok = run_gen_assets(store, project, tts=EdgeTTS(project.config.tts), image=image)
         if ok:
             console.print(f"[green]gen_assets 完成[/green] {len(project.scenes)} 场景归档")
         else:
@@ -148,16 +145,16 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         project_id: str = typer.Argument(..., help="项目 ID"),
         text: str = typer.Option(..., "--text", help="口播文案全文"),
     ) -> None:
-        """direct 节点：文案 → 分镜（DeepSeek 强制 JSON），校验后写入 project.json。"""
-        key = _require_key()
+        """direct 节点：文案 → 分镜（LLM 强制 JSON），校验后写入 project.json。"""
+        _load_env()
         store.init_repo()
         project = _load_project_or_exit(store, project_id)
+        try:
+            director = make_director(project.config.llm)
+        except KeyError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
 
-        director = Director(
-            api_key=key,
-            model=project.config.llm.model,
-            base_url=os.environ.get("SILICONFLOW_BASE_URL"),
-        )
         if run_direct(store, project, director, text):
             console.print(f"[green]direct 完成[/green] {len(project.scenes)} 个分镜")
             for s in project.scenes:

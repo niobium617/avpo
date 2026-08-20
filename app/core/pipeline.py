@@ -20,9 +20,9 @@ from app.core.schema import Asset, Project, Scene
 from app.core.state import FatalError, run_task
 from app.director.director import Director
 from app.tts.base import TTSProvider
-from app.tts.subs import build_subtitles
+from app.tts.subs import build_subtitles, reattach_punctuation
+from app.vision.base import ImageProvider
 from app.vision.cache import ImageCache, prompt_hash
-from app.vision.flux import FluxImage
 
 
 def run_direct(store: ProjectStore, project: Project, director: Director, text: str) -> bool:
@@ -37,7 +37,7 @@ def run_direct(store: ProjectStore, project: Project, director: Director, text: 
     return run_task(store, project, "direct", fn)
 
 
-def run_gen_assets(store: ProjectStore, project: Project, tts: TTSProvider, image: FluxImage) -> bool:
+def run_gen_assets(store: ProjectStore, project: Project, tts: TTSProvider, image: ImageProvider) -> bool:
     """gen_assets 节点：逐场景生成配音段 + 字幕 + 图，归档入 assets/。"""
     def fn(p: Project) -> None:
         cache = ImageCache(store.project_dir(p.project_id))
@@ -50,7 +50,7 @@ def run_gen_assets(store: ProjectStore, project: Project, tts: TTSProvider, imag
 
 
 def _gen_scene_assets(
-    store: ProjectStore, project: Project, scene: Scene, tts: TTSProvider, image: FluxImage
+    store: ProjectStore, project: Project, scene: Scene, tts: TTSProvider, image: ImageProvider
 ) -> None:
     config = project.config
     assets_dir = store.project_dir(project.project_id) / "assets"
@@ -69,7 +69,9 @@ def _gen_scene_assets(
     )
 
     # 2) 字幕 = TTS 时间戳聚合（与配音零成本对齐）
-    project.subtitles.extend(build_subtitles(result.words, scene.scene_id))
+    # edge-tts 词事件不含标点 → 先把文案标点回贴到词上，断句规则才可用
+    words = reattach_punctuation(result.words, scene.narration)
+    project.subtitles.extend(build_subtitles(words, scene.scene_id))
 
     # 3) 生图（缓存命中 0 API 调用）
     gen = image.generate(

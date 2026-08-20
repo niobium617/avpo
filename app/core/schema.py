@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 TaskStatus = Literal["pending", "running", "done", "failed"]
 MotionKind = Literal["zoom_in_slow", "zoom_out", "pan_left", "pan_right", "none"]
 AssetKind = Literal["image", "audio", "video"]
+# LLM/生图渠道：siliconflow（FLUX + DeepSeek-V3）或 dashscope（通义万相 + qwen）
+ProviderKind = Literal["siliconflow", "dashscope"]
 
 # 编排层状态机节点（IMPLEMENTATION_PLAN §5）
 PIPELINE_NODES = ("direct", "confirm", "gen_assets", "timeline", "export")
@@ -34,12 +36,15 @@ class TTSConfig(StrictModel):
 
 
 class ImageConfig(StrictModel):
-    model: str = "black-forest-labs/FLUX.1-schnell"
+    provider: ProviderKind = "siliconflow"
+    model: str = "black-forest-labs/FLUX.1-schnell"   # dashscope 渠道用 wanx2.1-t2i-turbo
     size: str = "16:9"
 
 
 class LLMConfig(StrictModel):
-    # SiliconFlow 渠道的 DeepSeek-V3（deepseek-chat 是 DeepSeek 官方 API 的命名）
+    provider: ProviderKind = "siliconflow"
+    # siliconflow 渠道的 DeepSeek-V3（deepseek-chat 是 DeepSeek 官方 API 的命名）；
+    # dashscope 渠道用 qwen-plus
     model: str = "deepseek-ai/DeepSeek-V3"
 
 

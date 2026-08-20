@@ -11,6 +11,7 @@
 不变式（验收断言依据）：
 - 字幕时间不重叠（后段 start ≥ 前段 end）。
 - 去空白后，字幕文本拼接 == 词文本拼接（覆盖全文）。
+  TTS 词事件不含标点时（edge-tts 实测如此），先 reattach_punctuation 回贴再断言。
 """
 
 import re
@@ -52,6 +53,46 @@ class Segment:
 
 def _char_len(text: str) -> int:
     return len(re.sub(r"\s+", "", text))
+
+
+def _is_content(ch: str) -> bool:
+    """内容字符：中文/字母/数字。标点（含中文标点）与空白不算。"""
+    return ch.isalnum() or ("一" <= ch <= "鿿")
+
+
+def reattach_punctuation(words: list[TTSWord], narration: str) -> list[TTSWord]:
+    """把 narration 中位于词间的标点/空白回贴到前一词尾部。
+
+    edge-tts 的 WordBoundary 文本不含标点（实测，见 tests/edge_tts_log.md 词数 < 字数），
+    回贴后「按 。！？ 断句」的聚合规则才可用，字幕文本也与文案逐字对齐。
+    词内容与文案内容不一致（增删改字）时抛 ValueError。
+    """
+    content_positions = [i for i, ch in enumerate(narration) if _is_content(ch)]
+    target = "".join(narration[i] for i in content_positions)
+    joined = "".join(ch for w in words for ch in w.text if _is_content(ch))
+    if joined != target:
+        raise ValueError(f"词流与文案不一致（文案 {len(target)} 内容字，词流 {len(joined)}）")
+
+    out: list[TTSWord] = []
+    target_cursor = 0
+    narr_cursor = 0
+    for w in words:
+        content = "".join(ch for ch in w.text if _is_content(ch))
+        if not content:
+            continue                              # 纯标点词：丢弃（标点已回贴）
+        idx = target.find(content, target_cursor)
+        if idx == -1:
+            raise ValueError(f"词 {content!r} 无法对齐到文案")
+        start = content_positions[idx]
+        end = content_positions[idx + len(content) - 1]
+        if out:
+            out[-1].text += narration[narr_cursor:start]   # 词间标点/空白回贴到前词
+        out.append(TTSWord(text=w.text, start_ms=w.start_ms, end_ms=w.end_ms))
+        narr_cursor = end + 1
+        target_cursor = idx + len(content)
+    if out:
+        out[-1].text += narration[narr_cursor:]           # 尾标点回贴到末词
+    return out
 
 
 def aggregate(

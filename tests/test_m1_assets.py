@@ -17,11 +17,13 @@ from dotenv import load_dotenv
 
 from app.core.pipeline import run_direct, run_gen_assets
 from app.core.project import ProjectStore
+from app.core.providers import config_for_provider, make_director, make_image
 from app.core.schema import Project
 from app.director.director import Director
 from app.tts.base import TTSResult, TTSWord
 from app.tts.tts_edge import EdgeTTS
-from app.vision.flux import COST_PER_IMAGE, PNG_MAGIC, FluxImage
+from app.vision.base import PNG_MAGIC
+from app.vision.flux import COST_PER_IMAGE, FluxImage
 
 TEXT = "AI 正在改变内容创作的方式。现在，一个人也能做视频。"
 VALID_SCENES = json.dumps(
@@ -246,28 +248,31 @@ def test_chain_survives_retry_no_duplicate_subtitles(store, chain_project, monke
 
 @pytest.mark.live
 def test_real_full_chain(tmp_path: Path):
-    """真实 DeepSeek + edge-tts + FLUX 全链路。需 .env 里 SILICONFLOW_API_KEY。
+    """真实 LLM + edge-tts + 生图全链路，渠道按 .env 里的 key 自动选择。
 
     运行：pytest -m live
     """
     load_dotenv()
-    api_key = os.environ.get("SILICONFLOW_API_KEY")
-    if not api_key:
-        pytest.skip("未配置 SILICONFLOW_API_KEY（.env）")
+    if os.environ.get("DASHSCOPE_API_KEY", "").strip():
+        config = config_for_provider("dashscope")
+    elif os.environ.get("SILICONFLOW_API_KEY", "").strip():
+        config = config_for_provider("siliconflow")
+    else:
+        pytest.skip("未配置 DASHSCOPE_API_KEY 或 SILICONFLOW_API_KEY（.env）")
 
     store = ProjectStore(tmp_path / "data")
     store.init_repo()
-    project = Project(project_id="proj_live", title="真实链路验证")
+    project = Project(project_id="proj_live", title="真实链路验证", config=config)
     store.create(project)
 
-    ok_direct = run_direct(store, project, Director(api_key=api_key), TEXT)
+    ok_direct = run_direct(store, project, make_director(project.config.llm), TEXT)
     assert ok_direct, f"direct 失败: {project.errors}"
     assert len(project.scenes) == 2
 
     ok_assets = run_gen_assets(
         store, project,
         tts=EdgeTTS(project.config.tts),
-        image=FluxImage(api_key=api_key),
+        image=make_image(project.config.image),
     )
     assert ok_assets, f"gen_assets 失败: {project.errors}"
 

@@ -4,10 +4,12 @@ import urllib.request
 
 import pytest
 
+from app.vision.base import MAX_ATTEMPTS, PNG_MAGIC
 from app.vision.cache import ImageCache, prompt_hash
-from app.vision.flux import COST_PER_IMAGE, MAX_ATTEMPTS, PNG_MAGIC, FluxImage
+from app.vision.flux import COST_PER_IMAGE, FluxImage
 
 FAKE_PNG = PNG_MAGIC + b"fake-image-bytes"
+FLUX_MODEL = "black-forest-labs/FLUX.1-schnell"
 
 
 class _Resp:
@@ -99,8 +101,8 @@ def test_generate_second_time_hits_cache_zero_api_calls(flux_with_png, tmp_path)
     out1 = tmp_path / "a1.png"
     out2 = tmp_path / "a2.png"
 
-    r1 = flux.generate("cat", out1)
-    r2 = flux.generate("cat", out2)
+    r1 = flux.generate("cat", out1, model=FLUX_MODEL)
+    r2 = flux.generate("cat", out2, model=FLUX_MODEL)
 
     assert len(fake.calls) == 1                    # 二次生成 0 次 API 调用
     assert not r1.from_cache and r1.cost == COST_PER_IMAGE
@@ -111,7 +113,7 @@ def test_generate_second_time_hits_cache_zero_api_calls(flux_with_png, tmp_path)
 
 def test_generate_sends_expected_params(flux_with_png, tmp_path):
     flux, fake = flux_with_png
-    flux.generate("cat", tmp_path / "a.png", model="black-forest-labs/FLUX.1-schnell", size="16:9")
+    flux.generate("cat", tmp_path / "a.png", model=FLUX_MODEL, size="16:9")
 
     call = fake.calls[0]
     assert call["model"] == "black-forest-labs/FLUX.1-schnell"
@@ -126,7 +128,7 @@ def test_generate_retries_on_transient_error(flux_with_png, tmp_path):
     fake.outcomes = [RuntimeError("boom"), RuntimeError("boom"), _Resp("https://example.com/x.png")]
     fake.calls.clear()
 
-    result = flux.generate("cat", tmp_path / "a.png")
+    result = flux.generate("cat", tmp_path / "a.png", model=FLUX_MODEL)
 
     assert result.from_cache is False and result.seed is not None
     assert len(fake.calls) == 3
@@ -142,7 +144,7 @@ def test_generate_raises_after_all_attempts_fail(monkeypatch, tmp_path):
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen(FAKE_PNG))
 
     with pytest.raises(RuntimeError, match="3 次均失败"):
-        flux.generate("cat", tmp_path / "a.png")
+        flux.generate("cat", tmp_path / "a.png", model=FLUX_MODEL)
     assert len(fake.calls) == MAX_ATTEMPTS
 
 
@@ -154,7 +156,7 @@ def test_generate_rejects_non_png(monkeypatch, tmp_path):
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen(b"GIF89a-not-png"))
 
     with pytest.raises(RuntimeError, match="不是 PNG"):
-        flux.generate("cat", tmp_path / "a.png")
+        flux.generate("cat", tmp_path / "a.png", model=FLUX_MODEL)
 
 
 def test_generate_without_cache_never_hits(tmp_path, monkeypatch):
@@ -164,6 +166,6 @@ def test_generate_without_cache_never_hits(tmp_path, monkeypatch):
     flux.client.images = fake
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen(FAKE_PNG))
 
-    flux.generate("cat", tmp_path / "a.png")
-    flux.generate("cat", tmp_path / "b.png")
+    flux.generate("cat", tmp_path / "a.png", model=FLUX_MODEL)
+    flux.generate("cat", tmp_path / "b.png", model=FLUX_MODEL)
     assert len(fake.calls) == 2

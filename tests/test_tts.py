@@ -10,7 +10,7 @@ import edge_tts
 import pytest
 from mutagen.mp3 import MP3
 
-from app.tts.subs import aggregate, build_subtitles
+from app.tts.subs import aggregate, build_subtitles, reattach_punctuation
 from app.tts.tts_edge import EdgeTTS
 from app.tts.base import TTSWord
 
@@ -158,6 +158,37 @@ def test_invariants_hold_on_mixed_text():
     assert seg_word_texts == word_texts
     # 18 字上限（除末段合并导致的超限外）
     assert all(len(norm(s.text)) <= 19 for s in segs)
+
+
+def test_reattach_punctuation_restores_full_text():
+    """edge-tts 词事件不含标点 → 回贴后词拼接 == 文案。"""
+    narration = "今天很好，我们走吧。"
+    content_words = [word(t, i * 100, i * 100 + 80) for i, t in enumerate("今天很好我们走吧")]
+    out = reattach_punctuation(content_words, narration)
+    assert "".join(w.text for w in out) == narration
+
+
+def test_reattach_english_spacing_preserved():
+    narration = "AI Copilot，速度很快。"
+    words = [
+        word("AI", 0, 80), word(" Copilot", 100, 180),
+        *[word(ch, i * 100, i * 100 + 80) for i, ch in enumerate("速度很快", 2)],
+    ]
+    out = reattach_punctuation(words, narration)
+    joined = re.sub(r"\s+", " ", "".join(w.text for w in out)).strip()
+    assert joined == narration
+
+
+def test_reattach_enables_hard_punct_split():
+    out = reattach_punctuation(
+        [word(t, i * 100, i * 100 + 80) for i, t in enumerate("一二三")], "一二三。"
+    )
+    assert aggregate(out)[0].text == "一二三。"
+
+
+def test_reattach_mismatch_raises():
+    with pytest.raises(ValueError, match="不一致"):
+        reattach_punctuation(char_words("你好"), "你不好")
 
 
 def test_build_subtitles_binds_scene():
