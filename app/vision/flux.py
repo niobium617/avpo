@@ -38,8 +38,8 @@ class GeneratedImage:
 class FluxImage:
     """SiliconFlow FLUX.1-schnell 生图器。"""
 
-    def __init__(self, api_key: str, cache: ImageCache | None = None, base_url: str = BASE_URL):
-        self.client = openai.OpenAI(base_url=base_url, api_key=api_key)
+    def __init__(self, api_key: str, cache: ImageCache | None = None, base_url: str | None = None):
+        self.client = openai.OpenAI(base_url=base_url or BASE_URL, api_key=api_key)
         self.cache = cache
 
     def generate(

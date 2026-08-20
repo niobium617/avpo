@@ -45,3 +45,52 @@ def test_status_missing_project_exits_1(tmp_path: Path) -> None:
     app = create_app(tmp_path / "data")
     result = CliRunner().invoke(app, ["status", "nope"])
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------- M1-2.8 CLI 命令
+
+def test_direct_missing_key_exits_1(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("app.cli._load_env", lambda: None)      # 无 .env 密钥
+    app = create_app(tmp_path / "data")
+    runner = CliRunner()
+    runner.invoke(app, ["new", "proj_001"])
+
+    result = runner.invoke(app, ["direct", "proj_001", "--text", "你好。"])
+    assert result.exit_code == 1
+    assert "SILICONFLOW_API_KEY" in result.output
+
+
+def test_direct_runs_with_key(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("app.cli._load_env", lambda: "sk-test")
+    # 假 run_direct：不动真实 LLM API
+    monkeypatch.setattr("app.cli.run_direct", lambda store, p, d, text: True)
+    app = create_app(tmp_path / "data")
+    runner = CliRunner()
+    runner.invoke(app, ["new", "proj_001"])
+
+    result = runner.invoke(app, ["direct", "proj_001", "--text", "你好。"])
+    assert result.exit_code == 0, result.output
+    assert "direct 完成" in result.output
+
+
+def test_gen_assets_missing_key_exits_1(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("app.cli._load_env", lambda: None)
+    app = create_app(tmp_path / "data")
+    runner = CliRunner()
+    runner.invoke(app, ["new", "proj_001"])
+
+    result = runner.invoke(app, ["gen-assets", "proj_001"])
+    assert result.exit_code == 1
+    assert "SILICONFLOW_API_KEY" in result.output
+
+
+def test_gen_assets_runs_with_key(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("app.cli._load_env", lambda: "sk-test")
+    monkeypatch.setattr("app.cli.run_gen_assets", lambda store, p, tts, image: True)
+    app = create_app(tmp_path / "data")
+    runner = CliRunner()
+    runner.invoke(app, ["new", "proj_001"])
+
+    result = runner.invoke(app, ["gen-assets", "proj_001"])
+    assert result.exit_code == 0, result.output
+    assert "gen_assets 完成" in result.output

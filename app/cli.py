@@ -2,6 +2,8 @@
 
 用法：
     avpo new proj_001 --title "AI 产品口播"
+    avpo direct proj_001 --text "口播文案全文"
+    avpo gen-assets proj_001
     avpo status proj_001
 """
 
@@ -9,16 +11,45 @@ import os
 from pathlib import Path
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.tree import Tree
 
+from app.core.pipeline import run_direct, run_gen_assets
 from app.core.project import ProjectStore
 from app.core.schema import Project
+from app.director.director import Director
+from app.tts.tts_edge import EdgeTTS
+from app.vision.flux import FluxImage
 
 console = Console()
 
 # 默认数据目录 = AVPO/data；环境变量 AVPO_DATA 可覆盖（测试用）
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+
+def _load_env() -> str | None:
+    """加载项目根 .env（不存在则跳过），返回 SiliconFlow API key（可能为 None）。"""
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path)
+    return os.environ.get("SILICONFLOW_API_KEY")
+
+
+def _require_key() -> str:
+    key = _load_env()
+    if not key:
+        console.print("[red]缺少 SILICONFLOW_API_KEY：请在项目根 .env 配置（模板见 .env.example）[/red]")
+        raise typer.Exit(code=1)
+    return key
+
+
+def _load_project_or_exit(store: ProjectStore, project_id: str) -> Project:
+    try:
+        return store.load(project_id)
+    except FileNotFoundError:
+        console.print(f"[red]项目不存在: {project_id}[/red]")
+        raise typer.Exit(code=1)
 
 
 def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
@@ -91,6 +122,49 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         )
 
         console.print(root)
+
+    @app.command("gen-assets")
+    def gen_assets(
+        project_id: str = typer.Argument(..., help="项目 ID"),
+    ) -> None:
+        """gen_assets 节点：逐场景生成配音段 + 字幕 + 图（prompt_hash 缓存），归档入 assets/。"""
+        key = _require_key()
+        store.init_repo()
+        project = _load_project_or_exit(store, project_id)
+
+        ok = run_gen_assets(
+            store, project,
+            tts=EdgeTTS(project.config.tts),
+            image=FluxImage(api_key=key, base_url=os.environ.get("SILICONFLOW_BASE_URL")),
+        )
+        if ok:
+            console.print(f"[green]gen_assets 完成[/green] {len(project.scenes)} 场景归档")
+        else:
+            console.print(f"[red]gen_assets 失败[/red] {[e.error for e in project.errors]}")
+            raise typer.Exit(code=1)
+
+    @app.command()
+    def direct(
+        project_id: str = typer.Argument(..., help="项目 ID"),
+        text: str = typer.Option(..., "--text", help="口播文案全文"),
+    ) -> None:
+        """direct 节点：文案 → 分镜（DeepSeek 强制 JSON），校验后写入 project.json。"""
+        key = _require_key()
+        store.init_repo()
+        project = _load_project_or_exit(store, project_id)
+
+        director = Director(
+            api_key=key,
+            model=project.config.llm.model,
+            base_url=os.environ.get("SILICONFLOW_BASE_URL"),
+        )
+        if run_direct(store, project, director, text):
+            console.print(f"[green]direct 完成[/green] {len(project.scenes)} 个分镜")
+            for s in project.scenes:
+                console.print(f"  {s.scene_id}  motion={s.motion}  narration={len(s.narration)}字")
+        else:
+            console.print(f"[red]direct 失败[/red] {[e.error for e in project.errors]}")
+            raise typer.Exit(code=1)
 
     return app
 

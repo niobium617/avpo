@@ -30,8 +30,8 @@
 | 2.4 FLUX 生图（SiliconFlow） | `app/vision/flux.py` | ✅ 代码+8 mock 测试；真实 API 验证并入 2.8 |
 | 2.5 生图缓存 | `app/vision/cache.py` | ✅ |
 | 2.6 任务状态机 | `app/core/state.py` | ✅ 9 测试 |
-| 2.7 分镜生成（DeepSeek 强制 JSON） | `app/director/director.py` | ⬜ |
-| 2.8 素材链路测试 | `tests/test_m1_assets.py` | ⬜ |
+| 2.7 分镜生成（DeepSeek 强制 JSON） | `app/director/director.py` | ✅ 7 测试（narration 逐字覆盖校验 + 反馈重试） |
+| 2.8 素材链路测试 | `tests/test_m1_assets.py` + `app/core/pipeline.py` + CLI `direct`/`gen-assets` | ⏳ mock 回归 ✅（68 测试全绿）；真实全链路待 SILICONFLOW_API_KEY |
 
 **退出条件**：一条真实文案自动产出配音 + 字幕 + 3 张图，全部归档，`avpo status` 状态树正确。
 

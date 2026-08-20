@@ -39,7 +39,8 @@ class ImageConfig(StrictModel):
 
 
 class LLMConfig(StrictModel):
-    model: str = "deepseek-chat"
+    # SiliconFlow 渠道的 DeepSeek-V3（deepseek-chat 是 DeepSeek 官方 API 的命名）
+    model: str = "deepseek-ai/DeepSeek-V3"
 
 
 class ProjectConfig(StrictModel):

@@ -15,6 +15,7 @@ dependencies = [
     "typer==0.27.1",
     "mutagen==1.48.1",
     "pyJianYingDraft==0.3.0",
+    "python-dotenv==1.2.3",
 ]
 
 [project.scripts]
@@ -28,3 +29,7 @@ packages = ["app", "app.core", "app.director", "app.tts", "app.vision", "app.tim
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not live'"
+markers = [
+    "live: 真实外部 API 测试（edge-tts / SiliconFlow），需要 .env 密钥与网络，默认跳过；用 pytest -m live 显式运行",
+]
