@@ -22,14 +22,16 @@
 
 ### M1 素材链路（当前阶段，IMPLEMENTATION_PLAN §2）
 
-2.1 edge-tts 20 条稳定性实测（失败率 0 → 定版，否则切豆包 TTS）
-2.2 TTS 协议 + edge 实现（mp3 + word 时间戳，`app/tts/`）
-2.3 字幕聚合（标点断句 + 18 字上限，`app/tts/subs.py`）
-2.4 FLUX 生图（SiliconFlow images API，`app/vision/flux.py`）
-2.5 生图缓存（prompt_hash，`app/vision/cache.py`）
-2.6 任务状态机（`app/core/state.py`）
-2.7 分镜生成（DeepSeek 强制 JSON，`app/director/director.py`）
-2.8 素材链路测试（`tests/test_m1_assets.py`）
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 2.1 edge-tts 20 条稳定性实测 | `tests/edge_tts_log.md` | ✅ 20/20 一次通过 → 定版 |
+| 2.2 TTS 协议 + edge 实现 | `app/tts/base.py` `app/tts/tts_edge.py` | ✅ 9 测试 |
+| 2.3 字幕聚合 | `app/tts/subs.py` | ✅ |
+| 2.4 FLUX 生图（SiliconFlow） | `app/vision/flux.py` | ✅ 代码+8 mock 测试；真实 API 验证并入 2.8 |
+| 2.5 生图缓存 | `app/vision/cache.py` | ✅ |
+| 2.6 任务状态机 | `app/core/state.py` | ✅ 9 测试 |
+| 2.7 分镜生成（DeepSeek 强制 JSON） | `app/director/director.py` | ⬜ |
+| 2.8 素材链路测试 | `tests/test_m1_assets.py` | ⬜ |
 
 **退出条件**：一条真实文案自动产出配音 + 字幕 + 3 张图，全部归档，`avpo status` 状态树正确。
 

@@ -114,6 +114,13 @@ class ExportInfo(StrictModel):
     status: TaskStatus = "pending"
 
 
+class PipelineError(StrictModel):
+    """pipeline 节点失败摘要（app/core/state.py 写入，status 命令可读）。"""
+
+    node: str
+    error: str
+
+
 # ---------------------------------------------------------------- 顶层
 
 class Project(StrictModel):
@@ -124,6 +131,7 @@ class Project(StrictModel):
     pipeline: dict[str, TaskStatus] = Field(
         default_factory=lambda: {node: "pending" for node in PIPELINE_NODES}
     )
+    errors: list[PipelineError] = Field(default_factory=list)
     scenes: list[Scene] = Field(default_factory=list)
     voiceover: Voiceover = Field(default_factory=Voiceover)
     subtitles: list[Subtitle] = Field(default_factory=list)
