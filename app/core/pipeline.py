@@ -119,6 +119,14 @@ def run_timeline(store: ProjectStore, project: Project) -> bool:
     return run_task(store, project, "timeline", fn)
 
 
+def run_confirm(store: ProjectStore, project: Project) -> bool:
+    """confirm 节点：分镜人工确认。fn 本身空转 —— CLI 已展示分镜并读到用户 y 才调用。"""
+    def fn(p: Project) -> None:
+        pass
+
+    return run_task(store, project, "confirm", fn)
+
+
 def run_export(store: ProjectStore, project: Project, *, zip_archive: bool = True) -> bool:
     """export 节点：project → 剪映草稿目录（含 zip），写 project.export 状态。"""
     def fn(p: Project) -> None:

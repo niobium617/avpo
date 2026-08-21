@@ -8,6 +8,7 @@ import re
 
 import edge_tts
 import pytest
+from edge_tts.exceptions import NoAudioReceived
 from mutagen.mp3 import MP3
 
 from app.tts.subs import aggregate, build_subtitles, reattach_punctuation
@@ -106,6 +107,61 @@ def test_edge_synth_no_word_boundary_raises(tmp_path, fake_edge):
     fake_edge["chunks"] = _audio_chunks()
     with pytest.raises(RuntimeError, match="WordBoundary"):
         asyncio.run(EdgeTTS().synth("你好", tmp_path / "vo.mp3"))
+
+
+# ---------------------------------------------------------------- NoAudioReceived 重试
+
+class _FlakyCommunicate(_FakeCommunicate):
+    """前 n 次 stream 抛 NoAudioReceived，之后正常回放 chunks。"""
+
+    def __init__(self, text, voice, rate, chunks, failures: int, calls: dict):
+        super().__init__(text, voice, rate, chunks=chunks)
+        self.failures, self.calls = failures, calls
+
+    async def stream(self):
+        self.calls["n"] += 1
+        if self.calls["n"] <= self.failures:
+            raise NoAudioReceived("No audio was received. Please verify that your parameters are correct.")
+        for chunk in self.chunks:
+            yield chunk
+
+
+def _patch_flaky(monkeypatch, fake_edge, failures: int) -> dict:
+    """Communicate → 前 failures 次抛 NoAudioReceived 的假实现；sleep 换成无延迟。"""
+    from edge_tts.exceptions import NoAudioReceived  # noqa: F401 —— 保证路径可用
+
+    calls: dict = {"n": 0}
+
+    def factory(text, voice, rate="+0%", boundary="WordBoundary"):
+        return _FlakyCommunicate(text, voice, rate, fake_edge["chunks"], failures, calls)
+
+    monkeypatch.setattr(edge_tts, "Communicate", factory)
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr("app.tts.tts_edge.asyncio.sleep", no_sleep)
+    return calls
+
+
+def test_edge_synth_retries_no_audio_received(tmp_path, fake_edge, monkeypatch):
+    """NoAudioReceived 瞬态 → provider 内部重试后成功，不抛给外层。"""
+    fake_edge["chunks"] = [*_audio_chunks(), _wb("你", 0, 50_000)]
+    calls = _patch_flaky(monkeypatch, fake_edge, failures=2)
+
+    result = asyncio.run(EdgeTTS().synth("你", tmp_path / "vo.mp3"))
+
+    assert calls["n"] == 3                       # 2 次失败 + 1 次成功
+    assert result.words[0].text == "你"
+
+
+def test_edge_synth_exhausts_retries(tmp_path, fake_edge, monkeypatch):
+    """3 次全失败 → NoAudioReceived 抛出（外层状态机再兜底）。"""
+    calls = _patch_flaky(monkeypatch, fake_edge, failures=3)
+
+    with pytest.raises(NoAudioReceived):
+        asyncio.run(EdgeTTS().synth("你", tmp_path / "vo.mp3"))
+    assert calls["n"] == 3
 
 
 # ---------------------------------------------------------------- 2.3 字幕聚合

@@ -10,6 +10,8 @@
 """
 
 import os
+import sys
+import time
 from pathlib import Path
 
 import typer
@@ -17,11 +19,20 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.tree import Tree
 
-from app.core.pipeline import run_direct, run_export, run_gen_assets, run_timeline
+from app.core.pipeline import run_confirm, run_direct, run_export, run_gen_assets, run_timeline
 from app.core.project import ProjectStore
 from app.core.providers import config_for_provider, make_director, make_image
 from app.core.schema import Project
 from app.tts.tts_edge import EdgeTTS
+
+# 本机控制台是 GBK：¥/emoji 等字符打不出会抛 UnicodeEncodeError。
+# 保留 GBK 编码（中文正常显示），不可编码字符替换为 ?，不崩溃。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(errors="replace")
+        except (OSError, ValueError):
+            pass
 
 console = Console()
 
@@ -186,6 +197,79 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             raise typer.Exit(code=1)
 
     @app.command()
+    def run(
+        project_id: str = typer.Argument(..., help="项目 ID"),
+        text: str = typer.Option("", "--text", help="口播文案全文（direct 未完成时必需）"),
+        yes: bool = typer.Option(False, "--yes", "-y", help="跳过分镜确认（自动化/重跑）"),
+    ) -> None:
+        """一键流水线：direct → confirm → gen_assets → timeline → export。
+
+        已 done 的节点自动跳过（断点续跑）；失败的节点重试。
+        confirm 节点展示分镜后等 y/n，n 则退出（改文案重跑 direct，不标记失败）。
+        """
+        _load_env()
+        store.init_repo()
+        project = _load_project_or_exit(store, project_id)
+        start = time.time()
+        times: list[str] = []
+
+        def _fail(node: str) -> None:
+            console.print(f"[red]run 在 {node} 节点失败[/red] {[e.error for e in project.errors]}")
+            raise typer.Exit(code=1)
+
+        # 1) direct：文案 → 分镜
+        if project.pipeline["direct"] != "done":
+            if not text.strip():
+                console.print("[red]direct 未完成，需要 --text 提供口播文案[/red]")
+                raise typer.Exit(code=1)
+            try:
+                director = make_director(project.config.llm)
+            except KeyError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(code=1)
+            t0 = time.time()
+            if not run_direct(store, project, director, text):
+                _fail("direct")
+            times.append(f"direct {time.time() - t0:.1f}s")
+
+        # 2) confirm：展示分镜，等 y/n（n 退出不标记失败，改文案重跑）
+        if project.pipeline["confirm"] != "done":
+            _print_storyboard(project)
+            if not yes and not typer.confirm("分镜确认？"):
+                console.print("已取消。修改文案后重新执行 avpo run --text，分镜将重新生成。")
+                raise typer.Exit(code=1)
+            run_confirm(store, project)
+
+        # 3) gen_assets：配音 + 字幕 + 生图
+        if project.pipeline["gen_assets"] != "done":
+            try:
+                image = make_image(project.config.image)
+            except KeyError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(code=1)
+            t0 = time.time()
+            if not run_gen_assets(store, project, tts=EdgeTTS(project.config.tts), image=image):
+                _fail("gen_assets")
+            times.append(f"gen_assets {time.time() - t0:.1f}s")
+
+        # 4) timeline → 5) export
+        t0 = time.time()
+        if not run_timeline(store, project):
+            _fail("timeline")
+        times.append(f"timeline {time.time() - t0:.1f}s")
+
+        t0 = time.time()
+        if not run_export(store, project):
+            _fail("export")
+        times.append(f"export {time.time() - t0:.1f}s")
+
+        console.print(
+            f"[green]run 完成[/green] {project.project_id} 全链路 done，"
+            f"总耗时 {time.time() - start:.1f}s（{' / '.join(times)}）"
+        )
+        console.print(f"草稿: {project.export.path}")
+
+    @app.command()
     def direct(
         project_id: str = typer.Argument(..., help="项目 ID"),
         text: str = typer.Option(..., "--text", help="口播文案全文"),
@@ -213,6 +297,14 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
 
 def _style(status: str) -> str:
     return {"pending": "yellow", "running": "blue", "done": "green", "failed": "red"}.get(status, "white")
+
+
+def _print_storyboard(project: Project) -> None:
+    """confirm 前展示分镜：场景、运镜、文案、画面描述。"""
+    console.print("[cyan]分镜预览[/cyan]")
+    for s in project.scenes:
+        console.print(f"  {s.scene_id} [{s.motion}] {s.narration}")
+        console.print(f"    画面: {s.visual}")
 
 
 app = create_app()
