@@ -1,9 +1,13 @@
-"""素材链路编排 —— IMPLEMENTATION_PLAN 2.8 / 3.1 的实现载体。
+"""素材链路编排 —— IMPLEMENTATION_PLAN 2.8 / 3.1 / 3.2 的实现载体。
 
 run_direct：     direct 节点 —— 文案 → 分镜（Director 强制 JSON），校验后写 project.scenes。
 run_gen_assets： gen_assets 节点 —— 每个场景：配音段（TTS + word 时间戳）→ 字幕聚合
                 → 生图（带 prompt_hash 缓存），全部产物入 assets/，场景标记 done。
 run_timeline：   timeline 节点 —— 逐场景素材组装全局时间轴（M2-3.1）。
+run_export：     export 节点 —— project → 剪映草稿目录（M2-3.2），写 project.export。
+
+依赖语义：任一节点成功后，下游节点状态重置为 pending —— 上游产物变了，下游必须
+重跑（断点续跑不会拿着过期产物往下走）。
 
 产物命名约定（M2 时间线组装沿用）：
 - 配音段资产 id = vo_<scene_id>，路径 assets/vo_<scene_id>.mp3；
@@ -17,9 +21,10 @@ fn 可重入：重跑覆盖同一资产 id/路径，字幕整体重建（不叠�
 import asyncio
 
 from app.core.project import ProjectStore
-from app.core.schema import Asset, Project, Scene
+from app.core.schema import PIPELINE_NODES, Asset, Project, Scene
 from app.core.state import FatalError, run_task
 from app.director.director import Director
+from app.export.jianying import export as export_draft
 from app.timeline.builder import build_timeline
 from app.tts.base import TTSProvider
 from app.tts.subs import build_subtitles, reattach_punctuation
@@ -35,6 +40,7 @@ def run_direct(store: ProjectStore, project: Project, director: Director, text: 
         for scene in scenes:
             scene.cost["llm"] = share          # 一次调用成本均摊到各场景
         p.scenes = scenes
+        _invalidate_downstream(p, "direct")
 
     return run_task(store, project, "direct", fn)
 
@@ -47,6 +53,7 @@ def run_gen_assets(store: ProjectStore, project: Project, tts: TTSProvider, imag
         p.subtitles = []                        # 整体重建 → fn 可重入，重试不叠加
         for scene in p.scenes:
             _gen_scene_assets(store, p, scene, tts, image)
+        _invalidate_downstream(p, "gen_assets")
 
     return run_task(store, project, "gen_assets", fn)
 
@@ -107,5 +114,28 @@ def run_timeline(store: ProjectStore, project: Project) -> bool:
                 hint="先跑 avpo gen-assets",
             )
         build_timeline(p, store.project_dir(p.project_id))
+        _invalidate_downstream(p, "timeline")
 
     return run_task(store, project, "timeline", fn)
+
+
+def run_export(store: ProjectStore, project: Project, *, zip_archive: bool = True) -> bool:
+    """export 节点：project → 剪映草稿目录（含 zip），写 project.export 状态。"""
+    def fn(p: Project) -> None:
+        if p.pipeline["timeline"] != "done":
+            raise FatalError(
+                f"timeline 未完成（{p.pipeline['timeline']}），无法导出",
+                hint="先跑 avpo timeline",
+            )
+        project_dir = store.project_dir(p.project_id)
+        draft_dir = export_draft(p, project_dir, project_dir / "exports", zip_archive=zip_archive)
+        p.export.path = str(draft_dir.relative_to(project_dir)).replace("\\", "/")
+        p.export.status = "done"
+
+    return run_task(store, project, "export", fn)
+
+
+def _invalidate_downstream(project: Project, node: str) -> None:
+    """节点成功后把下游状态重置为 pending —— 上游产物变了，下游必须重跑。"""
+    for downstream in PIPELINE_NODES[PIPELINE_NODES.index(node) + 1:]:
+        project.pipeline[downstream] = "pending"

@@ -5,6 +5,7 @@
     avpo direct proj_001 --text "口播文案全文"
     avpo gen-assets proj_001
     avpo timeline proj_001
+    avpo export proj_001
     avpo status proj_001
 """
 
@@ -16,7 +17,7 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.tree import Tree
 
-from app.core.pipeline import run_direct, run_gen_assets, run_timeline
+from app.core.pipeline import run_direct, run_export, run_gen_assets, run_timeline
 from app.core.project import ProjectStore
 from app.core.providers import config_for_provider, make_director, make_image
 from app.core.schema import Project
@@ -167,6 +168,21 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             )
         else:
             console.print(f"[red]timeline 失败[/red] {[e.error for e in project.errors]}")
+            raise typer.Exit(code=1)
+
+    @app.command("export")
+    def export_cmd(
+        project_id: str = typer.Argument(..., help="项目 ID"),
+    ) -> None:
+        """export 节点：导出剪映草稿目录（三轨 + 字幕样式 + 淡入淡出）+ zip。"""
+        store.init_repo()
+        project = _load_project_or_exit(store, project_id)
+
+        if run_export(store, project):
+            console.print(f"[green]export 完成[/green] {project.export.path}")
+            console.print("下一步: 拷贝草稿目录进剪映草稿路径后打开剪映验证")
+        else:
+            console.print(f"[red]export 失败[/red] {[e.error for e in project.errors]}")
             raise typer.Exit(code=1)
 
     @app.command()

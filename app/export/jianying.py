@@ -5,17 +5,23 @@
 - 素材先拷入草稿目录再建素材引用 → 草稿自包含，zip 可迁移。
 - 运镜动画：zoom_in_slow/zoom_out 映射剪映入场动画（枚举中文名）；pan_* 暂无对应
   动画枚举，先降级为 none 不加动画（M2 扩展），不阻塞主线（IMPLEMENTATION_PLAN §7）。
+- M2-3.2 扩展：字幕样式（字号/居中/描边/低位）、配音段淡入淡出、草稿元信息
+  （draft_name/tm_duration）。封面由剪映取首帧自动生成 —— 首段从 0 起即首图。
 """
 
+import json
 import shutil
 from pathlib import Path
 
 from pyJianYingDraft import (  # noqa: N999 —— 包名本身大写
     AudioMaterial,
     AudioSegment,
+    ClipSettings,
     DraftFolder,
     IntroType,
+    TextBorder,
     TextSegment,
+    TextStyle,
     TrackSpec,
     TrackType,
     VideoSegment,
@@ -37,6 +43,14 @@ _TRACK_VIDEO = "v1"
 _TRACK_AUDIO = "a1"
 _TRACK_TEXT = "sub"
 _MATERIALS_DIR = "materials"
+
+# ---- M2-3.2 导出扩展（MVP 固定值；M3 风格模板再参数化）----
+# 字幕样式：6 号白字、居中、黑描边、下移到画布下部（剪映导入字幕惯例 y=-0.8）
+_SUB_STYLE = TextStyle(size=6.0, align=1)
+_SUB_BORDER = TextBorder(alpha=1.0, color=(0.0, 0.0, 0.0), width=40.0)
+_SUB_CLIP = ClipSettings(transform_y=-0.8)
+# 配音段淡入淡出：每段 300ms，衔接处不突兀、首段渐入末段渐出
+_FADE_MS = 300
 
 
 def export(
@@ -103,13 +117,12 @@ def export(
             duration_us = min(claimed_ms * 1000, material.duration)
         else:
             duration_us = material.duration
-        draft.add_segment(
-            AudioSegment(str(draft_paths[clip.asset_id]), trange(clip.offset_ms * 1000, duration_us)),
-            _TRACK_AUDIO,
-        )
+        segment = AudioSegment(str(draft_paths[clip.asset_id]), trange(clip.offset_ms * 1000, duration_us))
+        segment.add_fade(_FADE_MS * 1000, _FADE_MS * 1000)     # 淡入淡出 300ms
+        draft.add_segment(segment, _TRACK_AUDIO)
 
-    # 字幕轨：逐条文本段（样式定制留到 M2-3.2）。字幕存的是场景内相对时间戳
-    # （M1 产物，各场景从 0 开始），导出时按 scene.start_ms 平移到全局时间轴。
+    # 字幕轨：逐条文本段，带统一样式（M2-3.2：字号/居中/描边/低位）。字幕存的是
+    # 场景内相对时间戳（M1 产物，各场景从 0 开始），导出时按 scene.start_ms 平移到全局时间轴。
     scene_start = {s.scene_id: s.start_ms for s in project.scenes}
     draft.append_track(TrackSpec(TrackType.text, _TRACK_TEXT))
     for sub in project.subtitles:
@@ -118,11 +131,15 @@ def export(
             TextSegment(
                 sub.text,
                 trange((sub.start_ms + offset) * 1000, (sub.end_ms - sub.start_ms) * 1000),
+                style=_SUB_STYLE,
+                border=_SUB_BORDER,
+                clip_settings=_SUB_CLIP,
             ),
             _TRACK_TEXT,
         )
 
     draft.save()
+    _write_meta_info(project, Path(draft.save_path).parent)
 
     if zip_archive:
         shutil.make_archive(str(out_root / draft_name), "zip", root_dir=out_root, base_dir=draft_name)
@@ -149,3 +166,20 @@ def _copy_to_materials(src: Path, materials_dir: Path) -> Path:
         dst = candidate
     shutil.copy2(src, dst)
     return dst
+
+
+def _write_meta_info(project: Project, draft_dir: Path) -> None:
+    """补写草稿元信息（M2-3.2）：draft_name + tm_duration（微秒）。
+
+    draft_cover 留空 —— 剪映打开时取首帧自动生成封面缩略图，首段从 0 起即首图。
+    """
+    meta_path = draft_dir / "draft_meta_info.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["draft_name"] = project.title or project.project_id
+    # 总时长：优先配音汇总值，否则取视频轨最晚终点
+    end_ms = max(
+        (project.voiceover.duration_ms or 0),
+        *((c.start_ms + c.duration_ms) for c in project.timeline.video),
+    )
+    meta["tm_duration"] = end_ms * 1000
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

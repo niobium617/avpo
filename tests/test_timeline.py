@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.pipeline import run_timeline
+from app.core.pipeline import run_export, run_timeline
 from app.core.schema import (
     Asset,
     Project,
@@ -226,6 +226,50 @@ def test_run_timeline_success_and_skip(store, tmp_path: Path, monkeypatch) -> No
     # done 跳过：重跑不再读时长、不再组装
     assert run_timeline(store, project) is True
     assert len(calls) == 2
+
+
+def test_run_timeline_invalidates_export(store, tmp_path: Path, monkeypatch) -> None:
+    """timeline 重新组装成功后，下游 export 节点重置为 pending。"""
+    project = _make_project()
+    project.pipeline["gen_assets"] = "done"
+    project.pipeline["export"] = "done"          # 模拟此前已导出过
+    store.create(project)
+    _make_assets(store.project_dir(project.project_id))
+    _patch_durations(monkeypatch, {"vo_s1.mp3": 2400, "vo_s2.mp3": 1800})
+
+    assert run_timeline(store, project) is True
+    assert project.pipeline["timeline"] == "done"
+    assert project.pipeline["export"] == "pending"
+
+
+def test_run_export_requires_timeline(store, tmp_path: Path) -> None:
+    project = _make_project()
+    project.pipeline["gen_assets"] = "done"
+    store.create(project)
+
+    ok = run_export(store, project)
+
+    assert ok is False
+    assert project.pipeline["export"] == "failed"
+    assert any("timeline" in e.error for e in project.errors)
+
+
+def test_run_export_success(store, tmp_path: Path, monkeypatch) -> None:
+    """timeline → export 全链离线可跑：草稿目录 + zip + export 状态落盘。"""
+    project = _make_project()
+    project.pipeline["gen_assets"] = "done"
+    store.create(project)
+    _make_assets(store.project_dir(project.project_id))
+    _patch_durations(monkeypatch, {"vo_s1.mp3": 2400, "vo_s2.mp3": 1800})
+    assert run_timeline(store, project) is True
+
+    assert run_export(store, project) is True
+    assert project.pipeline["export"] == "done"
+    assert project.export.status == "done"
+    assert project.export.path == "exports/proj_tl_draft"
+    draft_dir = store.project_dir(project.project_id) / project.export.path
+    assert (draft_dir / "draft_content.json").is_file()
+    assert (draft_dir.with_suffix(".zip")).is_file()
 
 
 # ---------------------------------------------------------------- 导出平移
