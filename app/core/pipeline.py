@@ -16,9 +16,14 @@ run_export：     export 节点 —— project → 剪映草稿目录（M2-3.2�
 
 两个函数都走 app/core/state.py 的 run_task：done 跳过、失败重试 ×3、状态与产物同一次提交。
 fn 可重入：重跑覆盖同一资产 id/路径，字幕整体重建（不叠加）。
+
+M2-3.5 并发：配音+字幕阶段顺序执行（edge-tts 连续突发请求触发 NoAudioReceived，
+场景间留 0.3s 间隔），生图阶段 4 张并行（慢操作，实测 120s → ~50s）。
 """
 
 import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from app.core.project import ProjectStore
 from app.core.schema import PIPELINE_NODES, Asset, Project, Scene
@@ -30,6 +35,10 @@ from app.tts.base import TTSProvider
 from app.tts.subs import build_subtitles, reattach_punctuation
 from app.vision.base import ImageProvider
 from app.vision.cache import ImageCache, prompt_hash
+
+# ---- M2-3.5 并发参数 ----
+IMAGE_CONCURRENCY = 4       # 并发生图上限（3~4 张并行）
+_TTS_GAP_S = 0.3            # 场景间配音间隔：edge-tts 突发请求会触发 NoAudioReceived
 
 
 def run_direct(store: ProjectStore, project: Project, director: Director, text: str) -> bool:
@@ -51,20 +60,27 @@ def run_gen_assets(store: ProjectStore, project: Project, tts: TTSProvider, imag
         cache = ImageCache(store.project_dir(p.project_id))
         image.cache = cache                     # 管线持有缓存生命周期（每个项目一份）
         p.subtitles = []                        # 整体重建 → fn 可重入，重试不叠加
-        for scene in p.scenes:
-            _gen_scene_assets(store, p, scene, tts, image)
+        # 阶段 1：配音 + 字幕（顺序执行，场景间留间隔防 edge-tts 瞬态限流）
+        for i, scene in enumerate(p.scenes):
+            if i:
+                time.sleep(_TTS_GAP_S)
+            _gen_scene_voice(store, p, scene, tts)
+        # 阶段 2：并发生图（慢操作，4 张并行；缓存命中 0 API 调用）
+        if p.scenes:
+            with ThreadPoolExecutor(max_workers=min(IMAGE_CONCURRENCY, len(p.scenes))) as pool:
+                pool.map(lambda s: _gen_scene_image(store, p, s, image), p.scenes)
         _invalidate_downstream(p, "gen_assets")
 
     return run_task(store, project, "gen_assets", fn)
 
 
-def _gen_scene_assets(
-    store: ProjectStore, project: Project, scene: Scene, tts: TTSProvider, image: ImageProvider
+def _gen_scene_voice(
+    store: ProjectStore, project: Project, scene: Scene, tts: TTSProvider
 ) -> None:
+    """阶段 1：场景配音段 + 词级时间戳 → 字幕（与配音零成本对齐）。"""
     config = project.config
     assets_dir = store.project_dir(project.project_id) / "assets"
 
-    # 1) 配音段 + 词级时间戳（edge-tts 免费，成本 0）
     if not scene.narration.strip():
         raise FatalError(f"scene {scene.scene_id} 的 narration 为空", hint="重跑 direct 生成分镜")
     result = asyncio.run(tts.synth(scene.narration, assets_dir / f"vo_{scene.scene_id}.mp3"))
@@ -77,12 +93,18 @@ def _gen_scene_assets(
         status="done",
     )
 
-    # 2) 字幕 = TTS 时间戳聚合（与配音零成本对齐）
     # edge-tts 词事件不含标点 → 先把文案标点回贴到词上，断句规则才可用
     words = reattach_punctuation(result.words, scene.narration)
     project.subtitles.extend(build_subtitles(words, scene.scene_id))
 
-    # 3) 生图（缓存命中 0 API 调用）
+
+def _gen_scene_image(
+    store: ProjectStore, project: Project, scene: Scene, image: ImageProvider
+) -> None:
+    """阶段 2：场景生图（缓存命中 0 API 调用）。多个场景并发执行，各写各的资产。"""
+    config = project.config
+    assets_dir = store.project_dir(project.project_id) / "assets"
+
     gen = image.generate(
         scene.image_prompt,
         assets_dir / f"img_{scene.scene_id}.png",
