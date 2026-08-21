@@ -2,7 +2,19 @@
 
 > 动态进度跟踪。方案见 `EXECUTION_PLAN.md`，任务拆解见 `IMPLEMENTATION_PLAN.md`。
 
-## 当前状态（2026-08-20）
+## 当前状态（2026-08-21）
+
+**M2 端到端管线 —— 进行中**（3.1 时间线组装 ✅）
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 3.1 时间线组装 | `app/timeline/builder.py` + `run_timeline` + CLI `timeline` + schema 扩展 | ✅ 98 测试全绿 + `proj_m1demo` 真实链路组装通过（6408ms，无缝隙） |
+
+要点：
+- scene 时长 = 配音段 mutagen 实际时长，场景首尾相接；`Scene.start_ms` 记录全局起点；
+- 字幕保持场景内相对时间戳（M1 产物），**导出时**按 `scene.start_ms` 平移到全局时间轴 —— 单一真相源，组装幂等；
+- `AudioClip.duration_ms`（组装写入）优先于 `voiceover.duration_ms` 用于导出音频段时长；
+- 依赖检查：`gen_assets` 未 done 时 timeline 节点标 failed 并提示先跑 gen-assets。
 
 **M1 素材链路 —— ✅ 完成**（86 测试全绿 + 真实全链路验证通过）
 
@@ -25,11 +37,11 @@
 
 ### M2 端到端管线（IMPLEMENTATION_PLAN §3）
 
-3.1 时间线组装（scene 时长 = 对应配音段实际时长；运镜轮转，`app/timeline/builder.py`）
-3.2 导出扩展（字幕样式/音频淡入淡出/封面首帧，`app/export/jianying.py`）→ 剪映打开验证
-3.3 一键流水线 `avpo run`（direct→confirm→gen_assets→timeline→export，confirm 输出分镜 y/n）
-3.4 e2e 测试（固定 seed 固定输出 + 耗时记录）
-3.5 优化 ≤5 分钟（并发生图 3~4 张、LLM 流式、done 跳过）
+- [x] 3.1 时间线组装（scene 时长 = 对应配音段实际时长；运镜取 director 已分配值，`app/timeline/builder.py`）✅
+- [ ] 3.2 导出扩展（字幕样式/音频淡入淡出/封面首帧，`app/export/jianying.py`）→ 剪映打开验证
+- [ ] 3.3 一键流水线 `avpo run`（direct→confirm→gen_assets→timeline→export，confirm 输出分镜 y/n）
+- [ ] 3.4 e2e 测试（固定 seed 固定输出 + 耗时记录）
+- [ ] 3.5 优化 ≤5 分钟（并发生图 3~4 张、LLM 流式、done 跳过）
 
 **退出条件**：`avpo run` 一条 60s 口播全自动 ≤5 分钟，剪映打开成功。
 

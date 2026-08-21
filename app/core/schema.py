@@ -65,6 +65,7 @@ class Scene(StrictModel):
     image_prompt: str = ""      # 生图提示词（英文，喂 FLUX）
     image_asset_id: str | None = None
     motion: MotionKind = "none"
+    start_ms: int = 0           # 时间线全局起点（app/timeline/builder.py 组装时写入）
     status: TaskStatus = "pending"
     cost: dict[str, float] = Field(default_factory=dict)   # 如 {"image": 0.02, "llm": 0.001}
 
@@ -94,6 +95,7 @@ class VideoClip(StrictModel):
 class AudioClip(StrictModel):
     asset_id: str
     offset_ms: int = 0
+    duration_ms: int | None = None   # 组装后 clip 级实际时长；None 时导出取素材自身时长
 
 
 class Timeline(StrictModel):

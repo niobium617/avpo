@@ -4,6 +4,7 @@
     avpo new proj_001 --title "AI 产品口播"
     avpo direct proj_001 --text "口播文案全文"
     avpo gen-assets proj_001
+    avpo timeline proj_001
     avpo status proj_001
 """
 
@@ -15,7 +16,7 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.tree import Tree
 
-from app.core.pipeline import run_direct, run_gen_assets
+from app.core.pipeline import run_direct, run_gen_assets, run_timeline
 from app.core.project import ProjectStore
 from app.core.providers import config_for_provider, make_director, make_image
 from app.core.schema import Project
@@ -104,6 +105,16 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
 
         root.add(f"[cyan]subtitles[/cyan] ({len(project.subtitles)})")
 
+        clips = project.timeline.video
+        tl = root.add("[cyan]timeline[/cyan]")
+        if clips:
+            tl.add(
+                f"{len(clips)} 段 总 {project.voiceover.duration_ms or '-'}ms  "
+                f"末段止于 {clips[-1].start_ms + clips[-1].duration_ms}ms"
+            )
+        else:
+            tl.add("空（未组装）")
+
         assets = root.add(f"[cyan]assets[/cyan] ({len(project.assets)})")
         for aid, a in project.assets.items():
             assets.add(
@@ -138,6 +149,24 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             console.print(f"[green]gen_assets 完成[/green] {len(project.scenes)} 场景归档")
         else:
             console.print(f"[red]gen_assets 失败[/red] {[e.error for e in project.errors]}")
+            raise typer.Exit(code=1)
+
+    @app.command()
+    def timeline(
+        project_id: str = typer.Argument(..., help="项目 ID"),
+    ) -> None:
+        """timeline 节点：逐场景素材组装全局时间轴（场景时长 = 配音实际时长）。"""
+        store.init_repo()
+        project = _load_project_or_exit(store, project_id)
+
+        if run_timeline(store, project):
+            total = project.voiceover.duration_ms or 0
+            console.print(
+                f"[green]timeline 完成[/green] {len(project.timeline.video)} 段视频轨 + "
+                f"{len(project.timeline.voiceover)} 段音频轨，总时长 {total}ms"
+            )
+        else:
+            console.print(f"[red]timeline 失败[/red] {[e.error for e in project.errors]}")
             raise typer.Exit(code=1)
 
     @app.command()

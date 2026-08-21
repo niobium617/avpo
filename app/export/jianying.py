@@ -91,15 +91,16 @@ def export(
         _apply_motion(segment, clip.motion, clip.duration_ms)
         draft.add_segment(segment, _TRACK_VIDEO)
 
-    # 音频轨：整条配音。时长以实际音频为准（EXECUTION_PLAN §3）：project.json
-    # 里的 duration_ms 只是记录值，超出素材真实时长时截断，不抛错。
+    # 音频轨：时长优先级 clip.duration_ms（时间线组装写入）> voiceover.duration_ms
+    # （单条整片配音）> 素材自身时长；超出素材真实时长时截断，不抛错。
     for clip in project.timeline.voiceover:
         asset = project.assets[clip.asset_id]
         if asset.type != "audio":
             raise ValueError(f"音频轨素材类型不符: {clip.asset_id} 是 {asset.type}")
         material = AudioMaterial(str(draft_paths[clip.asset_id]))
-        if project.voiceover.duration_ms:
-            duration_us = min(project.voiceover.duration_ms * 1000, material.duration)
+        claimed_ms = clip.duration_ms if clip.duration_ms is not None else project.voiceover.duration_ms
+        if claimed_ms:
+            duration_us = min(claimed_ms * 1000, material.duration)
         else:
             duration_us = material.duration
         draft.add_segment(
@@ -107,11 +108,17 @@ def export(
             _TRACK_AUDIO,
         )
 
-    # 字幕轨：逐条文本段（样式定制留到 M2-3.2）
+    # 字幕轨：逐条文本段（样式定制留到 M2-3.2）。字幕存的是场景内相对时间戳
+    # （M1 产物，各场景从 0 开始），导出时按 scene.start_ms 平移到全局时间轴。
+    scene_start = {s.scene_id: s.start_ms for s in project.scenes}
     draft.append_track(TrackSpec(TrackType.text, _TRACK_TEXT))
     for sub in project.subtitles:
+        offset = scene_start.get(sub.scene_id, 0)
         draft.add_segment(
-            TextSegment(sub.text, trange(sub.start_ms * 1000, (sub.end_ms - sub.start_ms) * 1000)),
+            TextSegment(
+                sub.text,
+                trange((sub.start_ms + offset) * 1000, (sub.end_ms - sub.start_ms) * 1000),
+            ),
             _TRACK_TEXT,
         )
 

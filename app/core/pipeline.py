@@ -1,8 +1,9 @@
-"""M1 素材链路编排 —— IMPLEMENTATION_PLAN 2.8 退出条件的实现载体。
+"""素材链路编排 —— IMPLEMENTATION_PLAN 2.8 / 3.1 的实现载体。
 
 run_direct：     direct 节点 —— 文案 → 分镜（Director 强制 JSON），校验后写 project.scenes。
 run_gen_assets： gen_assets 节点 —— 每个场景：配音段（TTS + word 时间戳）→ 字幕聚合
                 → 生图（带 prompt_hash 缓存），全部产物入 assets/，场景标记 done。
+run_timeline：   timeline 节点 —— 逐场景素材组装全局时间轴（M2-3.1）。
 
 产物命名约定（M2 时间线组装沿用）：
 - 配音段资产 id = vo_<scene_id>，路径 assets/vo_<scene_id>.mp3；
@@ -19,6 +20,7 @@ from app.core.project import ProjectStore
 from app.core.schema import Asset, Project, Scene
 from app.core.state import FatalError, run_task
 from app.director.director import Director
+from app.timeline.builder import build_timeline
 from app.tts.base import TTSProvider
 from app.tts.subs import build_subtitles, reattach_punctuation
 from app.vision.base import ImageProvider
@@ -93,3 +95,17 @@ def _gen_scene_assets(
     scene.image_asset_id = img_id
     scene.cost["image"] = gen.cost
     scene.status = "done"
+
+
+def run_timeline(store: ProjectStore, project: Project) -> bool:
+    """timeline 节点：逐场景素材 → 全局时间轴（scene.start_ms + 双轨 + 总时长）。"""
+    def fn(p: Project) -> None:
+        # 前置依赖：素材链路必须已完成（图/配音资产在 gen_assets 里产出）
+        if p.pipeline["gen_assets"] != "done":
+            raise FatalError(
+                f"gen_assets 未完成（{p.pipeline['gen_assets']}），无法组装时间线",
+                hint="先跑 avpo gen-assets",
+            )
+        build_timeline(p, store.project_dir(p.project_id))
+
+    return run_task(store, project, "timeline", fn)
