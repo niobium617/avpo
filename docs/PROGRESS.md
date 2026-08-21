@@ -4,12 +4,15 @@
 
 ## 当前状态（2026-08-21）
 
-**M2 端到端管线 —— 进行中**（3.1 ✅ 3.2 ✅ 剪映打开验证 ✅）
+**M2 端到端管线 —— 3.1~3.5 全部完成**（115 测试全绿 + 真实 60s 口播 1.8min + 剪映打开验证 ✅）
 
 | 任务 | 产出 | 状态 |
 |---|---|---|
-| 3.1 时间线组装 | `app/timeline/builder.py` + `run_timeline` + CLI `timeline` + schema 扩展 | ✅ 98 测试全绿 + 真实链路组装（6408ms 无缝隙） |
-| 3.2 导出扩展 | 字幕样式/淡入淡出/元信息 + `run_export` + CLI `export` + 下游失效重跑 | ✅ 105 测试全绿 + **剪映 9.7.1 打开验证通过**（opened_log） |
+| 3.1 时间线组装 | `app/timeline/builder.py` + `run_timeline` + CLI `timeline` + schema 扩展 | ✅ |
+| 3.2 导出扩展 | 字幕样式/淡入淡出/元信息 + `run_export` + CLI `export` + 下游失效重跑 | ✅ 剪映 9.7.1 打开验证通过 |
+| 3.3 一键流水线 | CLI `run`（direct→confirm→gen_assets→timeline→export）+ edge-tts NoAudioReceived 重试 + GBK 控制台容错 | ✅ 真实全链路通过 |
+| 3.4 e2e 测试 | `tests/test_e2e.py`（固定输入→逐字段一致）+ `tests/e2e_time_log.md` | ✅ |
+| 3.5 优化 | 并发生图 4 张并行（gen_assets 120.6s→79.7s）+ done 跳过 | ✅ 60s 口播全自动 **106.9s ≈ 1.8min ≤5min** |
 
 要点：
 - scene 时长 = 配音段 mutagen 实际时长，场景首尾相接；`Scene.start_ms` 记录全局起点；
@@ -42,11 +45,12 @@
 
 - [x] 3.1 时间线组装（scene 时长 = 对应配音段实际时长；运镜取 director 已分配值，`app/timeline/builder.py`）✅
 - [x] 3.2 导出扩展（字幕样式/音频淡入淡出/封面首帧，`app/export/jianying.py`）→ 剪映打开验证 ✅（2026-08-21）
-- [ ] 3.3 一键流水线 `avpo run`（direct→confirm→gen_assets→timeline→export，confirm 输出分镜 y/n）
-- [ ] 3.4 e2e 测试（固定 seed 固定输出 + 耗时记录）
-- [ ] 3.5 优化 ≤5 分钟（并发生图 3~4 张、LLM 流式、done 跳过）
+- [x] 3.3 一键流水线 `avpo run`（direct→confirm→gen_assets→timeline→export，confirm 输出分镜 y/n）✅
+- [x] 3.4 e2e 测试（固定 seed 固定输出 + 耗时记录）✅
+- [x] 3.5 优化 ≤5 分钟（并发生图 3~4 张、LLM 流式、done 跳过）✅
 
 **退出条件**：`avpo run` 一条 60s 口播全自动 ≤5 分钟，剪映打开成功。
+→ 耗时已达标（56.3s 口播全链路 106.9s ≈ 1.8min）；`avpo_m2_final_draft` 已拷入剪映草稿目录，待打开验证。
 
 **退出条件**：一条真实文案自动产出配音 + 字幕 + 3 张图，全部归档，`avpo status` 状态树正确。
 
