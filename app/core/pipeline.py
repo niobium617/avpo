@@ -28,10 +28,12 @@ from concurrent.futures import ThreadPoolExecutor
 from app.core.project import ProjectStore
 from app.core.schema import PIPELINE_NODES, Asset, Project, Scene
 from app.core.state import FatalError, run_task
+from app.core.styles import load_style
 from app.director.director import Director
 from app.export.jianying import export as export_draft
 from app.timeline.builder import build_timeline
 from app.tts.base import TTSProvider
+from app.tts.cache import load_words, save_words
 from app.tts.subs import build_subtitles, reattach_punctuation
 from app.vision.base import ImageProvider
 from app.vision.cache import ImageCache, prompt_hash
@@ -42,9 +44,10 @@ _TTS_GAP_S = 0.3            # 场景间配音间隔：edge-tts 突发请求会�
 
 
 def run_direct(store: ProjectStore, project: Project, director: Director, text: str) -> bool:
-    """direct 节点：文案 → 分镜落盘。"""
+    """direct 节点：文案 → 分镜落盘（M3-4.4：按项目风格模板注入运镜指导）。"""
     def fn(p: Project) -> None:
-        scenes, cost = director.storyboard(text)
+        # 风格模板的运镜指导注入分镜提示词（fast_talk/emotional/explainer）
+        scenes, cost = director.storyboard(text, motion_hint=load_style(p.config.style).motion_hint)
         share = round(cost / len(scenes), 6)
         for scene in scenes:
             scene.cost["llm"] = share          # 一次调用成本均摊到各场景
@@ -77,14 +80,27 @@ def run_gen_assets(store: ProjectStore, project: Project, tts: TTSProvider, imag
 def _gen_scene_voice(
     store: ProjectStore, project: Project, scene: Scene, tts: TTSProvider
 ) -> None:
-    """阶段 1：场景配音段 + 词级时间戳 → 字幕（与配音零成本对齐）。"""
+    """阶段 1：场景配音段 + 词级时间戳 → 字幕（与配音零成本对齐）。
+
+    M3-4.1 断点续跑：mp3 + sidecar（narration_hash 校验）命中则跳过合成，
+    从缓存恢复词级时间戳重建字幕 —— kill -9 后重跑 0 次重复 API 调用；
+    文案改了缓存自动失效，重新合成。
+    """
     config = project.config
     assets_dir = store.project_dir(project.project_id) / "assets"
 
     if not scene.narration.strip():
         raise FatalError(f"scene {scene.scene_id} 的 narration 为空", hint="重跑 direct 生成分镜")
-    result = asyncio.run(tts.synth(scene.narration, assets_dir / f"vo_{scene.scene_id}.mp3"))
+
     vo_id = f"vo_{scene.scene_id}"
+    mp3_path = assets_dir / f"vo_{scene.scene_id}.mp3"
+
+    words = load_words(assets_dir, scene.scene_id, scene.narration) if mp3_path.is_file() else None
+    if words is None:
+        result = asyncio.run(tts.synth(scene.narration, mp3_path))
+        words = result.words
+        save_words(assets_dir, scene.scene_id, scene.narration, words)
+
     project.assets[vo_id] = Asset(
         type="audio",
         path=f"assets/vo_{scene.scene_id}.mp3",
@@ -94,8 +110,7 @@ def _gen_scene_voice(
     )
 
     # edge-tts 词事件不含标点 → 先把文案标点回贴到词上，断句规则才可用
-    words = reattach_punctuation(result.words, scene.narration)
-    project.subtitles.extend(build_subtitles(words, scene.scene_id))
+    project.subtitles.extend(build_subtitles(reattach_punctuation(words, scene.narration), scene.scene_id))
 
 
 def _gen_scene_image(

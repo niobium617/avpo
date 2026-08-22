@@ -1,0 +1,12 @@
+{
+  "id": "explainer",
+  "name": "解说向",
+  "description": "知识/解说类：字幕大字号偏上居中，重点句强调感，无 BGM",
+  "motion_hint": "运镜克制：以 zoom_in_slow 为主配合少量 pan_left，静止场景用 none，画面稳定突出讲解",
+  "subtitle_style": {
+    "size": 7.0,
+    "y": -0.55,
+    "border_width": 50.0
+  },
+  "bgm": null
+}

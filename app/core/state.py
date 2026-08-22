@@ -16,6 +16,7 @@ fn 的契约：
 import time
 from typing import Callable
 
+from app.core.errors import classify
 from app.core.project import ProjectStore
 from app.core.schema import PipelineError, Project
 
@@ -74,6 +75,10 @@ def _mark_failed(store: ProjectStore, project: Project, node: str, exc: Exceptio
     message = str(exc)
     if hint:
         message = f"{message}（{hint}）"
+    # M3-4.3：分类 + 修复动作落盘（PipelineError.kind/hint），status/cost 命令也能读到
+    kind, kind_hint = classify(exc)
     # 错误摘要持久化到 project.json：status 命令也能读到
-    project.errors.append(PipelineError(node=node, error=message))
+    project.errors.append(
+        PipelineError(node=node, error=message, kind=kind.value, hint=hint or kind_hint)
+    )
     store.save(project, message=f"{project.project_id}: {node} failed")

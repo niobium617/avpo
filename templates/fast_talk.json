@@ -1,0 +1,12 @@
+{
+  "id": "fast_talk",
+  "name": "快节奏口播",
+  "description": "带货/资讯类口播：运镜频繁切换制造节奏感，字幕醒目低位",
+  "motion_hint": "运镜要频繁切换、节奏快：zoom_in_slow / pan_left / zoom_out / pan_right 轮换使用，避免相邻场景用同一运镜",
+  "subtitle_style": {
+    "size": 6.0,
+    "y": -0.8,
+    "border_width": 40.0
+  },
+  "bgm": null
+}

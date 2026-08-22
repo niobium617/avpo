@@ -28,7 +28,7 @@ _FRAME_MS = 417 / 16.0     # 每帧 ≈26.06ms（417 字节 ÷ 16000 字节/秒�
 class _FakeDirector:
     """固定分镜：与文案无关的 2 场景（e2e 文案固定，允许硬编码）。"""
 
-    def storyboard(self, text: str) -> tuple[list[Scene], float]:
+    def storyboard(self, text: str, motion_hint: str = "") -> tuple[list[Scene], float]:
         scenes = [
             Scene(
                 scene_id="s1",

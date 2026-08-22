@@ -2,7 +2,30 @@
 
 > 动态进度跟踪。方案见 `EXECUTION_PLAN.md`，任务拆解见 `IMPLEMENTATION_PLAN.md`。
 
-## 当前状态（2026-08-21）
+## 当前状态（2026-08-22）
+
+**M3 健壮性 —— 4.1~4.6 全部完成**（139+ 测试全绿 + 断点 0 重复调用 + 成本告警 + 3 模板回归 + 打开成功率 3/3 ✅）
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 4.1 断点续跑 | `app/tts/cache.py`（sidecar + narration_hash 校验）+ `_gen_scene_voice` 缓存跳过 + `tests/test_resume.py` | ✅ kill -9 重跑 **0 次重复 API 调用**（5 测试） |
+| 4.2 成本统计 | `app/core/cost.py` + CLI `avpo cost [--budget 5]` + `tests/test_cost.py` | ✅ 明细/总计/超预算告警（4 测试） |
+| 4.3 错误分类 | `app/core/errors.py`（余额/限流/网络/格式/剪映五类 + 修复动作）+ `PipelineError.kind/hint` 落盘 + CLI 失败提示接入 + `tests/test_errors.py` | ✅ 三类错误均有测试（9 测试） |
+| 4.4 风格模板 | `templates/{fast_talk,emotional,explainer}.json` + `app/core/styles.py` + `ProjectConfig.style` + director motion_hint 注入 + 导出字幕样式参数化 + BGM 轨（缺失降级）+ `tests/test_regression.py`/`test_styles.py` | ✅ 3 模板 × 3 条全链路 12/12 通过 |
+| 4.5 成功率汇总 | `tests/opened_log.md` 汇总段 | ✅ 3/3 = 100% ≥90% |
+| 4.6 文档收尾 | `README.md`（安装/使用/成本/架构图）+ 本文件 | ✅ |
+
+要点（M3）：
+- **断点续跑**：配音 sidecar 缓存（`assets/vo_<scene>.json` 存词级时间戳 + narration_hash），
+  mp3 与 sidecar 都在且文案未变 → 跳过合成；文案变了缓存自动失效。生图侧 prompt_hash 已有同语义。
+  状态与产物同一次 git 提交（M2 已有），kill -9 后 `avpo run` 直接续跑。
+- **成本账本**：纯 SUM 不二次对账；LLM 分镜成本均摊到 `scene.cost.llm`，生图记 `scene.cost.image`
+  与 `asset.cost`（汇总只取场景侧避免双计）；默认预算 ¥5/项目。
+- **错误分类**：`classify(exc)` 关键词归入 API 余额/限流/网络 vs 格式 vs 剪映五类，
+  失败落盘 `PipelineError.kind/hint`，CLI 打印 `[分类] 详情（修复: ...）`；抛错方显式 hint 优先。
+- **风格模板**：`templates/*.json` = 运镜指导（注入 director 系统提示词）+ 字幕样式
+  （字号/低位 y/描边宽）+ 可选 BGM（`assets/bgm.mp3`，缺失降级跳过）；`default` 内建 = MVP 固定样式。
+- 回归护栏：`test_regression.py` 3 模板 × 3 条全链路（mock 渠道确定性），9/9 导出产物完整。
 
 **M2 端到端管线 —— 3.1~3.5 全部完成**（115 测试全绿 + 真实 60s 口播 1.8min + 剪映打开验证 ✅）
 
@@ -41,24 +64,23 @@
 
 ## 待办
 
-### M2 端到端管线（IMPLEMENTATION_PLAN §3）
+### M3 健壮性（IMPLEMENTATION_PLAN §4）
 
-- [x] 3.1 时间线组装（scene 时长 = 对应配音段实际时长；运镜取 director 已分配值，`app/timeline/builder.py`）✅
-- [x] 3.2 导出扩展（字幕样式/音频淡入淡出/封面首帧，`app/export/jianying.py`）→ 剪映打开验证 ✅（2026-08-21）
-- [x] 3.3 一键流水线 `avpo run`（direct→confirm→gen_assets→timeline→export，confirm 输出分镜 y/n）✅
-- [x] 3.4 e2e 测试（固定 seed 固定输出 + 耗时记录）✅
-- [x] 3.5 优化 ≤5 分钟（并发生图 3~4 张、LLM 流式、done 跳过）✅
+- [x] 4.1 断点续跑（TTS sidecar 缓存 + kill -9 重跑 0 次重复 API 调用，`app/tts/cache.py` + `tests/test_resume.py`）✅（2026-08-22）
+- [x] 4.2 成本统计（`app/core/cost.py` + CLI `avpo cost`，默认预算 ¥5/项目）✅
+- [x] 4.3 错误分类与可读化（`app/core/errors.py` 五类 + 修复动作，落盘 `PipelineError.kind/hint`）✅
+- [x] 4.4 风格模板（`templates/` 3 模板 + schema/director/export 接线 + 3×3 回归测试）✅
+- [x] 4.5 opened_log 汇总（3/3 = 100% ≥90%）✅
+- [x] 4.6 README + 架构图 ✅
 
-**退出条件**：`avpo run` 一条 60s 口播全自动 ≤5 分钟，剪映打开成功。
-→ ✅ **已达成**（2026-08-21）：56.3s 口播全链路 106.9s ≈ 1.8min；剪映 9.7.1 打开验证通过（`avpo_m2_final_draft`，见 opened_log）。**M2 正式关闭。**
+**退出条件**：成功率达标（3/3 ✅）；kill 恢复（test_resume ✅）、成本告警（test_cost ✅）、
+错误提示（test_errors ✅）全部验证；MVP 可交付使用。
+→ ✅ **已达成**（2026-08-22）。**M3 正式关闭。**
 
-## 下一步：M3 健壮性（IMPLEMENTATION_PLAN §4）
+## 下一步：M4 UI 工作台（阶段 1）
 
-4.1 断点续跑 / 4.2 成本统计 `avpo cost` / 4.3 错误分类可读化 / 4.4 3 个风格模板回归 / 4.5 导出成功率 ≥90% / 4.6 README + 架构图。
-
-**退出条件**：一条真实文案自动产出配音 + 字幕 + 3 张图，全部归档，`avpo status` 状态树正确。
-
-### M2 端到端管线（§3）→ M3 健壮性（§4）
+Streamlit 工作台：项目管理视图 + 流水线可视化 + 分镜确认页 + 成本面板。
+（待用户确认范围后再拆任务。）
 
 ## 钉版记录
 

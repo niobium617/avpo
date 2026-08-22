@@ -45,13 +45,21 @@ class Director:
         self.client = openai.OpenAI(base_url=base_url or BASE_URL, api_key=api_key)
         self.model = model
 
-    def storyboard(self, text: str) -> tuple[list[Scene], float]:
-        """返回 (场景列表, LLM 成本元)。校验失败重试 1 次，仍失败抛 FatalError。"""
+    def storyboard(self, text: str, motion_hint: str = "") -> tuple[list[Scene], float]:
+        """返回 (场景列表, LLM 成本元)。校验失败重试 1 次，仍失败抛 FatalError。
+
+        Args:
+            text: 口播文案全文。
+            motion_hint: M3-4.4 风格模板的运镜指导（追加到系统提示词，控制运镜分配）。
+        """
         if not text.strip():
             raise ValueError("文案为空，无法分镜")
         target = _normalize(text)
+        system = SYSTEM_PROMPT
+        if motion_hint:
+            system += f"\n4. 本片运镜风格要求：{motion_hint}"
         messages: list[dict] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": f"文案：\n{text}"},
         ]
 

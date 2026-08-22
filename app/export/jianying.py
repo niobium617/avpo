@@ -29,6 +29,7 @@ from pyJianYingDraft import (  # noqa: N999 —— 包名本身大写
 )
 
 from app.core.schema import Project
+from app.core.styles import load_style
 
 # 运镜 → 剪映入场动画（中文枚举名，见 jyd_notes §2）
 _MOTION_ANIMATION = {
@@ -38,19 +39,17 @@ _MOTION_ANIMATION = {
 # 动画时长上限：长片段不让入场动画拖太久（demo 实测 0.8~1s 观感 OK）
 _ANIM_MAX_MS = 2000
 
-# 草稿内的固定三轨名（MVP 固定三轨，见 EXECUTION_PLAN §1-决策5）
+# 草稿内的固定轨道名（MVP 固定三轨，见 EXECUTION_PLAN §1-决策5；BGM 为 M3-4.4 可选第 4 轨）
 _TRACK_VIDEO = "v1"
 _TRACK_AUDIO = "a1"
 _TRACK_TEXT = "sub"
+_TRACK_BGM = "bgm"
 _MATERIALS_DIR = "materials"
 
-# ---- M2-3.2 导出扩展（MVP 固定值；M3 风格模板再参数化）----
-# 字幕样式：6 号白字、居中、黑描边、下移到画布下部（剪映导入字幕惯例 y=-0.8）
-_SUB_STYLE = TextStyle(size=6.0, align=1)
-_SUB_BORDER = TextBorder(alpha=1.0, color=(0.0, 0.0, 0.0), width=40.0)
-_SUB_CLIP = ClipSettings(transform_y=-0.8)
 # 配音段淡入淡出：每段 300ms，衔接处不突兀、首段渐入末段渐出
 _FADE_MS = 300
+# BGM 尾部淡出 1s（音乐结尾不突兀）
+_BGM_FADE_OUT_MS = 1000
 
 
 def export(
@@ -80,6 +79,9 @@ def export(
     folder = DraftFolder(str(out_root))
     draft = folder.create_draft(draft_name, 1920, 1080, fps=30, allow_replace=True)
 
+    # M3-4.4 风格模板：字幕样式参数化 + 可选 BGM 轨
+    style = load_style(project.config.style)
+
     # 素材先拷入草稿 → 草稿自包含（相对引用 + zip 可迁移）
     materials_dir = Path(draft.save_path).parent / _MATERIALS_DIR
     materials_dir.mkdir(parents=True, exist_ok=True)
@@ -90,8 +92,17 @@ def export(
             raise FileNotFoundError(f"素材缺失: {asset_id} -> {src}")
         draft_paths[asset_id] = _copy_to_materials(src, materials_dir)
 
+    # BGM：模板配置了路径且文件存在才加轨（缺失降级跳过，不阻塞导出）
+    bgm_draft_path: Path | None = None
+    if style.bgm:
+        bgm_src = project_root / style.bgm
+        if bgm_src.is_file():
+            bgm_draft_path = _copy_to_materials(bgm_src, materials_dir)
+
     draft.append_track(TrackSpec(TrackType.video, _TRACK_VIDEO))
     draft.append_track(TrackSpec(TrackType.audio, _TRACK_AUDIO))
+    if bgm_draft_path:
+        draft.append_track(TrackSpec(TrackType.audio, _TRACK_BGM))
 
     # 视频轨：图片/视频素材 + 运镜入场动画
     for clip in project.timeline.video:
@@ -121,9 +132,23 @@ def export(
         segment.add_fade(_FADE_MS * 1000, _FADE_MS * 1000)     # 淡入淡出 300ms
         draft.add_segment(segment, _TRACK_AUDIO)
 
-    # 字幕轨：逐条文本段，带统一样式（M2-3.2：字号/居中/描边/低位）。字幕存的是
+    # BGM 轨：从 0 铺到整片结束（截断到素材自身时长），尾部 1s 淡出
+    if bgm_draft_path:
+        bgm_material = AudioMaterial(str(bgm_draft_path))
+        end_ms = _total_end_ms(project)
+        duration_us = min(end_ms * 1000, bgm_material.duration)
+        bgm_segment = AudioSegment(str(bgm_draft_path), trange(0, duration_us))
+        bgm_segment.add_fade(0, _BGM_FADE_OUT_MS * 1000)
+        draft.add_segment(bgm_segment, _TRACK_BGM)
+
+    # 字幕轨：逐条文本段，样式按风格模板（M2-3.2 固定样式 = default 模板）。字幕存的是
     # 场景内相对时间戳（M1 产物，各场景从 0 开始），导出时按 scene.start_ms 平移到全局时间轴。
     scene_start = {s.scene_id: s.start_ms for s in project.scenes}
+    sub_style = TextStyle(size=style.subtitle_style.size, align=1)
+    sub_border = TextBorder(
+        alpha=1.0, color=(0.0, 0.0, 0.0), width=style.subtitle_style.border_width
+    )
+    sub_clip = ClipSettings(transform_y=style.subtitle_style.y)
     draft.append_track(TrackSpec(TrackType.text, _TRACK_TEXT))
     for sub in project.subtitles:
         offset = scene_start.get(sub.scene_id, 0)
@@ -131,9 +156,9 @@ def export(
             TextSegment(
                 sub.text,
                 trange((sub.start_ms + offset) * 1000, (sub.end_ms - sub.start_ms) * 1000),
-                style=_SUB_STYLE,
-                border=_SUB_BORDER,
-                clip_settings=_SUB_CLIP,
+                style=sub_style,
+                border=sub_border,
+                clip_settings=sub_clip,
             ),
             _TRACK_TEXT,
         )
@@ -168,6 +193,14 @@ def _copy_to_materials(src: Path, materials_dir: Path) -> Path:
     return dst
 
 
+def _total_end_ms(project: Project) -> int:
+    """整片结束毫秒：优先配音汇总值，否则取视频轨最晚终点。"""
+    return max(
+        (project.voiceover.duration_ms or 0),
+        *((c.start_ms + c.duration_ms) for c in project.timeline.video),
+    )
+
+
 def _write_meta_info(project: Project, draft_dir: Path) -> None:
     """补写草稿元信息（M2-3.2）：draft_name + tm_duration（微秒）。
 
@@ -176,10 +209,5 @@ def _write_meta_info(project: Project, draft_dir: Path) -> None:
     meta_path = draft_dir / "draft_meta_info.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["draft_name"] = project.title or project.project_id
-    # 总时长：优先配音汇总值，否则取视频轨最晚终点
-    end_ms = max(
-        (project.voiceover.duration_ms or 0),
-        *((c.start_ms + c.duration_ms) for c in project.timeline.video),
-    )
-    meta["tm_duration"] = end_ms * 1000
+    meta["tm_duration"] = _total_end_ms(project) * 1000
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

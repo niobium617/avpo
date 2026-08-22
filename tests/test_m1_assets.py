@@ -211,7 +211,7 @@ def test_gen_assets_rerun_hits_image_cache(store, chain_project, monkeypatch):
     store.save(chain_project)
     assert run_gen_assets(store, chain_project, tts, image) is True
     assert len(images.calls) == 2                        # 未新增生图调用
-    assert len(tts.calls) == 4                           # TTS 无缓存，重新合成
+    assert len(tts.calls) == 2                           # M3-4.1: TTS sidecar 缓存命中，也未新增合成
 
 
 def test_chain_survives_retry_no_duplicate_subtitles(store, chain_project, monkeypatch):

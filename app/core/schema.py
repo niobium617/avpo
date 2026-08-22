@@ -52,6 +52,7 @@ class ProjectConfig(StrictModel):
     tts: TTSConfig = Field(default_factory=TTSConfig)
     image: ImageConfig = Field(default_factory=ImageConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    style: str = "default"   # M3-4.4 风格模板 id（templates/，default = MVP 固定样式）
 
 
 # ---------------------------------------------------------------- 内容
@@ -123,10 +124,16 @@ class ExportInfo(StrictModel):
 
 
 class PipelineError(StrictModel):
-    """pipeline 节点失败摘要（app/core/state.py 写入，status 命令可读）。"""
+    """pipeline 节点失败摘要（app/core/state.py 写入，status 命令可读）。
+
+    kind/hint 为 M3-4.3 扩展：错误分类 + 修复动作（app/core/errors.py classify 得出），
+    老项目 JSON 无此字段时默认空字符串，向后兼容。
+    """
 
     node: str
     error: str
+    kind: str = ""
+    hint: str = ""
 
 
 # ---------------------------------------------------------------- 顶层

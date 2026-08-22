@@ -19,10 +19,13 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.tree import Tree
 
+from app.core.cost import DEFAULT_BUDGET, summarize
+from app.core.errors import describe_list
 from app.core.pipeline import run_confirm, run_direct, run_export, run_gen_assets, run_timeline
 from app.core.project import ProjectStore
 from app.core.providers import config_for_provider, make_director, make_image
 from app.core.schema import Project
+from app.core.styles import list_styles, load_style
 from app.tts.tts_edge import EdgeTTS
 
 # 本机控制台是 GBK：¥/emoji 等字符打不出会抛 UnicodeEncodeError。
@@ -65,6 +68,7 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         title: str = typer.Option("", "--title", "-t", help="项目标题"),
         voice: str = typer.Option("zh-CN-YunxiNeural", "--voice", help="TTS 音色"),
         provider: str = typer.Option("siliconflow", "--provider", help="LLM/生图渠道: siliconflow | dashscope"),
+        style: str = typer.Option("default", "--style", help="风格模板: default|fast_talk|emotional|explainer"),
     ) -> None:
         """创建新项目：生成带默认配置的 project.json 并 git 提交。"""
         store.init_repo()
@@ -73,7 +77,13 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         except ValueError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1)
+        try:
+            load_style(style)                     # 校验模板 id（default 内建 + templates/*.json）
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
         project = Project(project_id=project_id, title=title or project_id, config=config)
+        project.config.style = style
         project.config.tts.voice = voice
         try:
             store.create(project)
@@ -160,7 +170,7 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         if ok:
             console.print(f"[green]gen_assets 完成[/green] {len(project.scenes)} 场景归档")
         else:
-            console.print(f"[red]gen_assets 失败[/red] {[e.error for e in project.errors]}")
+            console.print(f"[red]gen_assets 失败[/red] {describe_list(project.errors)}")
             raise typer.Exit(code=1)
 
     @app.command()
@@ -178,7 +188,7 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
                 f"{len(project.timeline.voiceover)} 段音频轨，总时长 {total}ms"
             )
         else:
-            console.print(f"[red]timeline 失败[/red] {[e.error for e in project.errors]}")
+            console.print(f"[red]timeline 失败[/red] {describe_list(project.errors)}")
             raise typer.Exit(code=1)
 
     @app.command("export")
@@ -193,7 +203,7 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             console.print(f"[green]export 完成[/green] {project.export.path}")
             console.print("下一步: 拷贝草稿目录进剪映草稿路径后打开剪映验证")
         else:
-            console.print(f"[red]export 失败[/red] {[e.error for e in project.errors]}")
+            console.print(f"[red]export 失败[/red] {describe_list(project.errors)}")
             raise typer.Exit(code=1)
 
     @app.command()
@@ -214,7 +224,7 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         times: list[str] = []
 
         def _fail(node: str) -> None:
-            console.print(f"[red]run 在 {node} 节点失败[/red] {[e.error for e in project.errors]}")
+            console.print(f"[red]run 在 {node} 节点失败[/red] {describe_list(project.errors)}")
             raise typer.Exit(code=1)
 
         # 1) direct：文案 → 分镜
@@ -270,6 +280,37 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         console.print(f"草稿: {project.export.path}")
 
     @app.command()
+    def cost(
+        project_id: str = typer.Argument(..., help="项目 ID"),
+        budget: float = typer.Option(DEFAULT_BUDGET, "--budget", help="预算上限（元，默认 5）"),
+    ) -> None:
+        """成本统计：按场景/资产汇总 API 成本（纯 SUM），超预算告警。"""
+        project = _load_project_or_exit(store, project_id)
+        s = summarize(project, budget)
+
+        console.print(f"[cyan]成本明细[/cyan] {project_id}（预算 {s.budget:.2f} 元）")
+        if s.by_scene:
+            for sid, costs in s.by_scene.items():
+                parts = "  ".join(f"{k}={v:.4f}" for k, v in costs.items()) or "-"
+                console.print(f"  {sid}  {parts}")
+        else:
+            console.print("  （暂无场景成本，先跑 avpo run 或 gen-assets）")
+        if s.by_asset:
+            console.print("[cyan]资产成本[/cyan]")
+            for aid, c in s.by_asset.items():
+                console.print(f"  {aid}  {c:.4f}")
+
+        if s.over_budget:
+            console.print(
+                f"[red]总计 {s.total:.4f} 元，超出预算 {s.total - s.budget:.2f} 元[/red]"
+            )
+            console.print("[red]提示：检查分镜数量/生图次数，或 --budget 调高预算[/red]")
+        else:
+            console.print(
+                f"[green]总计 {s.total:.4f} 元，预算内（剩 {s.budget - s.total:.2f} 元）[/green]"
+            )
+
+    @app.command()
     def direct(
         project_id: str = typer.Argument(..., help="项目 ID"),
         text: str = typer.Option(..., "--text", help="口播文案全文"),
@@ -289,7 +330,7 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             for s in project.scenes:
                 console.print(f"  {s.scene_id}  motion={s.motion}  narration={len(s.narration)}字")
         else:
-            console.print(f"[red]direct 失败[/red] {[e.error for e in project.errors]}")
+            console.print(f"[red]direct 失败[/red] {describe_list(project.errors)}")
             raise typer.Exit(code=1)
 
     return app
