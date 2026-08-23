@@ -16,6 +16,7 @@ dependencies = [
     "mutagen==1.48.1",
     "pyJianYingDraft==0.3.0",
     "python-dotenv==1.2.3",
+    "streamlit==1.62.0",
 ]
 
 [project.scripts]
@@ -25,7 +26,7 @@ avpo = "app.cli:app"
 dev = ["pytest==9.1.1"]
 
 [tool.setuptools]
-packages = ["app", "app.core", "app.director", "app.tts", "app.vision", "app.timeline", "app.export"]
+packages = ["app", "app.core", "app.director", "app.tts", "app.vision", "app.timeline", "app.export", "app.web"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
