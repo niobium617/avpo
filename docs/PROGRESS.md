@@ -2,7 +2,39 @@
 
 > 动态进度跟踪。方案见 `EXECUTION_PLAN.md`，任务拆解见 `IMPLEMENTATION_PLAN.md`。
 
-## 当前状态（2026-08-22）
+## 当前状态（2026-08-23）
+
+**M4 Streamlit 工作台 —— 5.1~5.7 全部完成**（171 测试全绿 + 四功能区 + avpo web 启动器）
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 5.0 依赖 | `streamlit==1.62.0`（pyproject/requirements 同步）+ `app.web` 包注册 | ✅ |
+| 5.1 core 扩展 | `app/core/env.py`（统一环境入口）+ `ProjectStore.list_project_ids/list_projects` + `pipeline.update_scenes`（narration 守卫 + 下游失效）+ `run_direct/run_gen_assets` 进度回调（as_completed 主线程回调）+ `tests/test_pipeline.py` | ✅ 11 新测试 |
+| 5.2 启动器 + 四页 | `avpo web`（USERPROFILE/HOME 重定向 data/webhome 禁写用户目录 + localhost 安全面）+ `.streamlit/config.toml` + `app/web/app.py` | ✅ 手动启动验证通过 |
+| 5.3 项目管理页 | 项目卡片（进度/成本）+ 新建表单（风格/渠道/音色）+ 坏 JSON 内联容错 | ✅ |
+| 5.4 流水线页 | 5 节点徽章 + 单节点按钮 + 一键全链路（st.status 阶段文字）+ 错误记录 + zip 下载 | ✅ |
+| 5.5 分镜确认页 | 逐场景编辑 visual/image_prompt/motion（narration 只读）+ 保存落盘下游重置 + 确认按钮 | ✅ |
+| 5.6 成本面板 | 总成本/预算 metric + 场景/资产明细 + 超预算告警 | ✅ |
+| 5.7 文档 | README M4 章节 + 里程碑表 + 本文件 | ✅ |
+
+要点（M4）：
+- **复用而非重写**：四页全部直接调 `app/core/pipeline.py` 五节点函数，done 跳过/重试/落盘/git
+  快照/断点续跑语义与 CLI 完全一致，浏览器与 CLI 混用安全。
+- **同步阻塞模型**：gen_assets 真实 API 1~2 分钟，`st.status` 阶段文字实时滚动；`progress`
+  回调参数（默认 None 向后兼容）为 M5 线程化 + 真进度条预留接口。生图段 `pool.map` →
+  `submit + as_completed`，回调只在主线程发出（Streamlit 线程限制）。
+- **分镜编辑不变量**：narration 只读（"拼接=原文"逐字校验）；visual/image_prompt/motion 可改，
+  保存后 confirm 及下游重置 pending —— 文案未变时 TTS sidecar 缓存命中，重跑成本可忽略。
+- **禁写用户目录**：streamlit 磁盘缓存硬编码 `~/.streamlit`，`avpo web` 用 subprocess env
+  重定向 USERPROFILE/HOME → `<数据目录>/webhome`（data/ 已 gitignore）。
+- **测试**：AppTest（`streamlit.testing.v1`）9 条全流程；工作台脚本对 core 走模块引用
+  （`pipeline.run_*`），monkeypatch 按 `app.core.*` 模块属性打补丁；widget 改动后显式 `at.run()`；
+  瞬态 success 不断言（rerun 后消失），断言落盘状态。
+- 数据目录 `AVPO_DATA` 环境变量正式生效（此前只存在于注释），`app/core/env.py` 统一解析。
+
+---
+
+## M3 健壮性 —— 4.1~4.6 全部完成（2026-08-22）
 
 **M3 健壮性 —— 4.1~4.6 全部完成**（139+ 测试全绿 + 断点 0 重复调用 + 成本告警 + 3 模板回归 + 打开成功率 3/3 ✅）
 
@@ -77,10 +109,11 @@
 错误提示（test_errors ✅）全部验证；MVP 可交付使用。
 → ✅ **已达成**（2026-08-22）。**M3 正式关闭。**
 
-## 下一步：M4 UI 工作台（阶段 1）
+## 下一步：阶段 1 后续（候选，待定）
 
-Streamlit 工作台：项目管理视图 + 流水线可视化 + 分镜确认页 + 成本面板。
-（待用户确认范围后再拆任务。）
+- M5 候选：流水线后台线程化 + 真进度条（M4 的 progress 回调已预留接口）；
+- 角色 Bible + 参考图注入（IP-Adapter / FLUX Redux 思路）；
+- Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）。
 
 ## 钉版记录
 
