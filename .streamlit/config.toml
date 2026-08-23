@@ -1,0 +1,11 @@
+# AVPO 工作台主题与安全默认值（M4）。
+# headless/port 走 `avpo web` 的 CLI 参数；手动 streamlit run 时保持自动开浏览器。
+[theme]
+base = "dark"
+primaryColor = "#FF6A3D"
+
+[server]
+address = "localhost"          # 本地工具，不绑 0.0.0.0
+
+[browser]
+gatherUsageStats = false

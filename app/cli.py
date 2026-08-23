@@ -7,19 +7,21 @@
     avpo timeline proj_001
     avpo export proj_001
     avpo status proj_001
+    avpo web --port 8501
 """
 
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 import typer
-from dotenv import load_dotenv
 from rich.console import Console
 from rich.tree import Tree
 
 from app.core.cost import DEFAULT_BUDGET, summarize
+from app.core.env import DEFAULT_DATA_DIR, PROJECT_ROOT, load_project_env as _load_env, resolve_data_dir
 from app.core.errors import describe_list
 from app.core.pipeline import run_confirm, run_direct, run_export, run_gen_assets, run_timeline
 from app.core.project import ProjectStore
@@ -38,16 +40,6 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 console = Console()
-
-# 默认数据目录 = AVPO/data；环境变量 AVPO_DATA 可覆盖（测试用）
-DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-
-
-def _load_env() -> None:
-    """加载项目根 .env（不存在则跳过），把渠道 key/base_url 注入环境变量。"""
-    env_path = Path(__file__).resolve().parents[1] / ".env"
-    if env_path.is_file():
-        load_dotenv(env_path)
 
 
 def _load_project_or_exit(store: ProjectStore, project_id: str) -> Project:
@@ -332,6 +324,29 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         else:
             console.print(f"[red]direct 失败[/red] {describe_list(project.errors)}")
             raise typer.Exit(code=1)
+
+    @app.command()
+    def web(
+        port: int = typer.Option(8501, "--port", "-p", help="Streamlit 端口（默认 8501）"),
+    ) -> None:
+        """启动 Streamlit 工作台：项目管理 / 流水线 / 分镜确认 / 成本面板。
+
+        M4：把 streamlit 的磁盘缓存（硬编码 ~/.streamlit）重定向到
+        <数据目录>/webhome —— 不在用户目录（C 盘）写任何文件。
+        """
+        web_home = resolve_data_dir() / "webhome"
+        web_home.mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "USERPROFILE": str(web_home), "HOME": str(web_home)}
+        cmd = [
+            sys.executable, "-m", "streamlit", "run",
+            str(PROJECT_ROOT / "app" / "web" / "app.py"),
+            "--server.port", str(port),
+            "--server.headless", "true",
+            "--server.address", "localhost",
+            "--browser.gatherUsageStats", "false",
+        ]
+        console.print(f"[cyan]AVPO 工作台[/cyan] http://localhost:{port}（数据目录: {resolve_data_dir()}）")
+        subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=False)
 
     return app
 
