@@ -15,6 +15,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from app.core.schema import Project
 
 TMP_SUFFIX = ".tmp"
@@ -98,6 +100,29 @@ class ProjectStore:
         if not path.is_file():
             raise FileNotFoundError(f"项目不存在: {project_id}（{path}）")
         return Project.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def list_project_ids(self) -> list[str]:
+        """枚举项目 id：projects/ 下含 project.json 的目录名，按名排序。
+
+        只检查文件存在、不解析内容 —— 一个损坏的 project.json 不会让枚举崩溃
+        （UI 项目选择器用；选中后的加载错误由调用方展示）。
+        """
+        if not self.projects_dir.is_dir():
+            return []
+        return sorted(
+            d.name for d in self.projects_dir.iterdir()
+            if d.is_dir() and (d / "project.json").is_file()
+        )
+
+    def list_projects(self) -> list[Project]:
+        """枚举全部项目对象；坏 JSON 抛 ValueError（含项目 id），不静默兜底。"""
+        projects: list[Project] = []
+        for pid in self.list_project_ids():
+            try:
+                projects.append(self.load(pid))
+            except ValidationError as exc:
+                raise ValueError(f"项目 {pid} 的 project.json 损坏: {exc}") from exc
+        return projects
 
     def save(self, project: Project, message: str | None = None) -> Project:
         """原子写 + git 提交。message 缺省时用 project_id 生成。"""

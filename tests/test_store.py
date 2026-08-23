@@ -63,3 +63,30 @@ def test_load_corrupt_json_raises(store: ProjectStore, sample_project: Project) 
     store.json_path("proj_001").write_text("{ 这不是合法 JSON", encoding="utf-8")
     with pytest.raises(Exception):
         store.load("proj_001")
+
+
+# ---- M4-5.1 项目枚举（web 工作台项目选择器） ----
+
+def test_list_project_ids_empty(store: ProjectStore) -> None:
+    assert store.list_project_ids() == []
+
+
+def test_list_project_ids_sorted(store: ProjectStore, sample_project: Project) -> None:
+    for pid in ("proj_b", "proj_a"):
+        p = sample_project.model_copy(deep=True)
+        p.project_id = pid
+        store.create(p)
+    assert store.list_project_ids() == ["proj_a", "proj_b"]
+
+
+def test_list_project_ids_ignores_dir_without_json(store: ProjectStore, sample_project: Project) -> None:
+    store.create(sample_project)
+    (store.projects_dir / "stray").mkdir()          # 无 project.json 的目录不算项目
+    assert store.list_project_ids() == ["proj_001"]
+
+
+def test_list_projects_corrupt_json_raises_with_id(store: ProjectStore, sample_project: Project) -> None:
+    store.create(sample_project)
+    store.json_path("proj_001").write_text("{ 损坏", encoding="utf-8")
+    with pytest.raises(ValueError, match="proj_001"):
+        store.list_projects()

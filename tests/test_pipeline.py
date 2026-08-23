@@ -1,0 +1,122 @@
+"""M4-5.1 验收：update_scenes 分镜修改落盘 + run_direct/run_gen_assets 进度回调。"""
+
+import pytest
+
+from app.core.pipeline import run_direct, run_gen_assets, update_scenes
+from app.core.schema import PIPELINE_NODES, Project, Scene
+from app.tts.base import TTSResult, TTSWord
+from app.vision.base import PNG_MAGIC, ImageProvider
+
+
+class _FakeDirector:
+    """假导演：把文案原样做成 1 个场景（校验 narration 拼接=原文可通过）。"""
+
+    def storyboard(self, text, motion_hint=""):
+        return [
+            Scene(scene_id="s1", narration=text, visual="旧画面", image_prompt="old prompt", motion="none")
+        ], 0.001
+
+
+class _FakeTTS:
+    """假 TTS：逐字 100ms（与 test_m1_assets.FakeTTS 同款，不跨文件 import 保持独立）。"""
+
+    async def synth(self, text, out_mp3):
+        out_mp3.parent.mkdir(parents=True, exist_ok=True)
+        out_mp3.write_bytes(b"fake-mp3")
+        words = [TTSWord(text=ch, start_ms=i * 100, end_ms=i * 100 + 80) for i, ch in enumerate(text)]
+        return TTSResult(mp3=out_mp3, words=words, duration_ms=len(text) * 100)
+
+
+class _FakeImage(ImageProvider):
+    """假生图：直接返回 PNG 魔数 + 占位字节。"""
+
+    cost_per_image = 0.02
+
+    def _request_png(self, prompt, model, pixel_size, seed):
+        return PNG_MAGIC + b"fake"
+
+
+# ---------------------------------------------------------------- update_scenes
+
+def test_update_scenes_persists_edits(store, sample_project):
+    store.create(sample_project)
+    scenes = [s.model_copy(deep=True) for s in sample_project.scenes]
+    scenes[0].visual = "新画面"
+    scenes[0].image_prompt = "new prompt"
+    scenes[0].motion = "pan_right"
+
+    update_scenes(store, sample_project, scenes)
+
+    loaded = store.load("proj_001")
+    assert loaded.scenes[0].visual == "新画面"
+    assert loaded.scenes[0].image_prompt == "new prompt"
+    assert loaded.scenes[0].motion == "pan_right"
+    assert loaded.scenes[1] == scenes[1]            # 未编辑场景原样保留
+
+
+def test_update_scenes_invalidates_downstream(store, sample_project):
+    store.create(sample_project)
+    sample_project.pipeline = {node: "done" for node in PIPELINE_NODES}
+    store.save(sample_project)
+    scenes = [s.model_copy(deep=True) for s in sample_project.scenes]
+
+    update_scenes(store, sample_project, scenes)
+
+    loaded = store.load("proj_001")
+    assert loaded.pipeline["direct"] == "done"      # 上游不变
+    for node in ("confirm", "gen_assets", "timeline", "export"):
+        assert loaded.pipeline[node] == "pending"   # 下游全部重跑
+
+
+def test_update_scenes_rejects_narration_change(store, sample_project):
+    store.create(sample_project)
+    scenes = [s.model_copy(deep=True) for s in sample_project.scenes]
+    scenes[0].narration = "改了文案。"
+    with pytest.raises(ValueError, match="narration"):
+        update_scenes(store, sample_project, scenes)
+
+
+def test_update_scenes_rejects_duplicate_scene_id(store, sample_project):
+    store.create(sample_project)
+    scenes = [s.model_copy(deep=True) for s in sample_project.scenes]
+    scenes[1].scene_id = "s1"                       # 触发 Project 引用完整性校验
+    with pytest.raises(ValueError, match="scene_id"):
+        update_scenes(store, sample_project, scenes)
+
+
+# ---------------------------------------------------------------- 进度回调（M4）
+
+def test_run_direct_progress_callback(store):
+    project = Project(project_id="proj_p", title="进度回调")
+    store.create(project)
+    msgs: list[str] = []
+
+    assert run_direct(store, project, _FakeDirector(), "你好。", progress=msgs.append) is True
+
+    assert msgs == ["调用 LLM 生成分镜…", "分镜生成完成（1 场景）"]
+
+
+def test_run_gen_assets_progress_callback(store):
+    project = Project(project_id="proj_p", title="进度回调", scenes=[
+        Scene(scene_id="s1", narration="你好。", visual="v1", image_prompt="p1"),
+        Scene(scene_id="s2", narration="世界。", visual="v2", image_prompt="p2"),
+    ])
+    store.create(project)
+    msgs: list[str] = []
+
+    assert run_gen_assets(store, project, _FakeTTS(), _FakeImage(), progress=msgs.append) is True
+
+    assert msgs[:2] == ["配音+字幕 1/2（s1）", "配音+字幕 2/2（s2）"]
+    # 生图段 2 张并发完成，顺序不定，只断集合
+    assert sorted(msgs[2:]) == ["生图 1/2", "生图 2/2"]
+
+
+def test_run_gen_assets_no_progress_still_works(store):
+    """默认 progress=None 向后兼容：不传回调跑通全链。"""
+    project = Project(project_id="proj_p", title="无回调", scenes=[
+        Scene(scene_id="s1", narration="你好。", visual="v", image_prompt="p"),
+    ])
+    store.create(project)
+
+    assert run_gen_assets(store, project, _FakeTTS(), _FakeImage()) is True
+    assert project.pipeline["gen_assets"] == "done"

@@ -23,7 +23,8 @@ M2-3.5 并发：配音+字幕阶段顺序执行（edge-tts 连续突发请求触
 
 import asyncio
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.core.project import ProjectStore
 from app.core.schema import PIPELINE_NODES, Asset, Project, Scene
@@ -43,22 +44,60 @@ IMAGE_CONCURRENCY = 4       # 并发生图上限（3~4 张并行）
 _TTS_GAP_S = 0.3            # 场景间配音间隔：edge-tts 突发请求会触发 NoAudioReceived
 
 
-def run_direct(store: ProjectStore, project: Project, director: Director, text: str) -> bool:
-    """direct 节点：文案 → 分镜落盘（M3-4.4：按项目风格模板注入运镜指导）。"""
+def run_direct(
+    store: ProjectStore,
+    project: Project,
+    director: Director,
+    text: str,
+    progress: Callable[[str], None] | None = None,
+) -> bool:
+    """direct 节点：文案 → 分镜落盘（M3-4.4：按项目风格模板注入运镜指导）。
+
+    progress（M4）：阶段文字回调，供 UI 展示（CLI 不传，默认 None 向后兼容）。
+    """
     def fn(p: Project) -> None:
+        if progress:
+            progress("调用 LLM 生成分镜…")
         # 风格模板的运镜指导注入分镜提示词（fast_talk/emotional/explainer）
         scenes, cost = director.storyboard(text, motion_hint=load_style(p.config.style).motion_hint)
         share = round(cost / len(scenes), 6)
         for scene in scenes:
             scene.cost["llm"] = share          # 一次调用成本均摊到各场景
         p.scenes = scenes
+        if progress:
+            progress(f"分镜生成完成（{len(scenes)} 场景）")
         _invalidate_downstream(p, "direct")
 
     return run_task(store, project, "direct", fn)
 
 
-def run_gen_assets(store: ProjectStore, project: Project, tts: TTSProvider, image: ImageProvider) -> bool:
-    """gen_assets 节点：逐场景生成配音段 + 字幕 + 图，归档入 assets/。"""
+def update_scenes(store: ProjectStore, project: Project, scenes: list[Scene]) -> Project:
+    """分镜人工修改落盘：只允许改 visual / image_prompt / motion。
+
+    narration 是「拼接=原文」的逐字校验不变量，改动即拒绝（改文案请重新跑 direct）。
+    落盘后 direct 下游全部重置 pending —— 生图提示词/运镜变了，素材/时间线/导出
+    必须重跑；配音文案未变时 TTS sidecar 缓存命中，重跑成本可忽略。
+    """
+    if [s.narration for s in scenes] != [s.narration for s in project.scenes]:
+        raise ValueError("narration 不可修改（分镜文案逐字不变量）；改文案请重新运行 direct")
+    project.scenes = scenes
+    _invalidate_downstream(project, "direct")
+    store.save(project, message=f"{project.project_id}: 分镜人工修改")
+    return project
+
+
+def run_gen_assets(
+    store: ProjectStore,
+    project: Project,
+    tts: TTSProvider,
+    image: ImageProvider,
+    progress: Callable[[str], None] | None = None,
+) -> bool:
+    """gen_assets 节点：逐场景生成配音段 + 字幕 + 图，归档入 assets/。
+
+    progress（M4）：阶段文字回调，供 UI 展示。生图段用 submit + as_completed，
+    主线程逐个取结果后回调 —— 进度回调绝不从工作线程发出（Streamlit 线程限制）。
+    """
     def fn(p: Project) -> None:
         cache = ImageCache(store.project_dir(p.project_id))
         image.cache = cache                     # 管线持有缓存生命周期（每个项目一份）
@@ -68,10 +107,16 @@ def run_gen_assets(store: ProjectStore, project: Project, tts: TTSProvider, imag
             if i:
                 time.sleep(_TTS_GAP_S)
             _gen_scene_voice(store, p, scene, tts)
+            if progress:
+                progress(f"配音+字幕 {i + 1}/{len(p.scenes)}（{scene.scene_id}）")
         # 阶段 2：并发生图（慢操作，4 张并行；缓存命中 0 API 调用）
         if p.scenes:
             with ThreadPoolExecutor(max_workers=min(IMAGE_CONCURRENCY, len(p.scenes))) as pool:
-                pool.map(lambda s: _gen_scene_image(store, p, s, image), p.scenes)
+                futures = [pool.submit(_gen_scene_image, store, p, s, image) for s in p.scenes]
+                for done_n, fut in enumerate(as_completed(futures), 1):
+                    fut.result()                # 主线程取结果：异常冒泡给 run_task 重试
+                    if progress:
+                        progress(f"生图 {done_n}/{len(p.scenes)}")
         _invalidate_downstream(p, "gen_assets")
 
     return run_task(store, project, "gen_assets", fn)
