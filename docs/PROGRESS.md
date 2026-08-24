@@ -2,7 +2,31 @@
 
 > 动态进度跟踪。方案见 `EXECUTION_PLAN.md`，任务拆解见 `IMPLEMENTATION_PLAN.md`。
 
-## 当前状态（2026-08-23）
+## 当前状态（2026-08-24）
+
+**M5 工作台后台线程化 + 真进度条 —— 6.1~6.3 全部完成**（183 测试全绿）
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 6.1 结构化进度事件 | `app/core/progress.py`（`ProgressEvent(node/message/percent)`）+ 五节点全补 progress 回调（timeline/confirm/export 补参数；gen_assets 配音 45%/生图 55% 分段 percent）+ `ProjectStore.save` 线程锁（`_SAVE_LOCK` 串行化原子写+git 提交）+ test_pipeline/test_timeline/test_store 6 新测试 | ✅ |
+| 6.2 工作台线程化 | `app/web/tasks.py`（TaskContainer 锁容器 + worker 执行体，零 streamlit import）+ app.py 删同步执行改 `_start_node/_start_chain` + 按钮 busy 禁用 + `@st.fragment(run_every=1.0)` 进度轮询 + 完成 st.rerun 刷新 + 分镜页运行中禁改 + test_web.py 6 新用例 | ✅ |
+| 6.3 文档 | README M5 章节 + 里程碑表 + 本文件 | ✅ |
+
+要点（M5）：
+- **线程纪律（已核实 streamlit 1.62 源码）**：worker 线程绝不调 st.*、绝不碰 st.session_state
+  （无 ScriptRunContext 时回退全局 mock 单例与本会话脱钩）——worker 只写 TaskContainer（Lock
+  保护），fragment 轮询读 snapshot()；daemon 线程进程退出不滞留。
+- **fragment 轮询**：`st.fragment(run_every=1.0)` 函数体在全页 run 时内联执行（AppTest 每次
+  at.run() 都执行）；run_every timer 由前端持有（真实运行 ~1s 轮询，AppTest 手动驱动）。
+  完成分支先 `del session_state["task"]` 再 `st.rerun()`（默认 scope="app" 是 fragment 内
+  唯一合法 scope）——防 rerun 死循环。
+- **防双开**：运行中五按钮 + 分镜编辑/确认禁用（busy 在 run 顶部计算，点击后的下一次 run
+  才渲染禁用态）；双开兜底在 `_start_node` 内检查。
+- **测试模式**：`_wait_task` 等容器 done Event（worker 独立于脚本线程）；SafeSessionState
+  无 `.get` 用 in+[]；mock 秒回时任务可能已被同 run 的 fragment 消费（task None 时断
+  task_result）。核心验收 = 慢 mock sleep 2s 而 at.run() 秒回即证非阻塞。
+
+## M4 Streamlit 工作台 —— 5.1~5.7 全部完成（2026-08-23）
 
 **M4 Streamlit 工作台 —— 5.1~5.7 全部完成**（171 测试全绿 + 四功能区 + avpo web 启动器）
 
@@ -20,9 +44,9 @@
 要点（M4）：
 - **复用而非重写**：四页全部直接调 `app/core/pipeline.py` 五节点函数，done 跳过/重试/落盘/git
   快照/断点续跑语义与 CLI 完全一致，浏览器与 CLI 混用安全。
-- **同步阻塞模型**：gen_assets 真实 API 1~2 分钟，`st.status` 阶段文字实时滚动；`progress`
-  回调参数（默认 None 向后兼容）为 M5 线程化 + 真进度条预留接口。生图段 `pool.map` →
-  `submit + as_completed`，回调只在主线程发出（Streamlit 线程限制）。
+- **同步阻塞模型**（M5 已改造为后台线程 + 真进度条）：gen_assets 真实 API 1~2 分钟，
+  `st.status` 阶段文字实时滚动；`progress` 回调参数（默认 None 向后兼容）为 M5 预留接口。
+  生图段 `pool.map` → `submit + as_completed`，回调只在主线程发出（Streamlit 线程限制）。
 - **分镜编辑不变量**：narration 只读（"拼接=原文"逐字校验）；visual/image_prompt/motion 可改，
   保存后 confirm 及下游重置 pending —— 文案未变时 TTS sidecar 缓存命中，重跑成本可忽略。
 - **禁写用户目录**：streamlit 磁盘缓存硬编码 `~/.streamlit`，`avpo web` 用 subprocess env
@@ -111,9 +135,9 @@
 
 ## 下一步：阶段 1 后续（候选，待定）
 
-- M5 候选：流水线后台线程化 + 真进度条（M4 的 progress 回调已预留接口）；
-- 角色 Bible + 参考图注入（IP-Adapter / FLUX Redux 思路）；
-- Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）。
+- M6 候选：角色 Bible + 参考图注入（IP-Adapter / FLUX Redux 思路）；
+- Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
+- 工作台多任务并行（当前单会话单任务）；进度条跨页可见（当前只在流水线页）。
 
 ## 钉版记录
 

@@ -3,7 +3,7 @@
 > 连接剧本、AI 生成模型与剪映的智能中间层，消除工具间搬运与对齐。
 > 一句话创意 → 分镜 → 配音 → 生图 → 字幕 → 剪映草稿，全自动。
 
-**当前状态：M0~M4 全部完成（MVP 可交付 + Streamlit 工作台）**
+**当前状态：M0~M5 全部完成（MVP 可交付 + Streamlit 工作台 + 后台线程化真进度条）**
 
 ## MVP 工作流（营销口播视频）
 
@@ -85,19 +85,24 @@ avpo web                                               # http://localhost:8501
 - **失败重试**：Transient 重试 ×3（指数退避），Fatal 不重试；下游节点在上游成功后
   自动重置 pending 重跑。
 
-## Streamlit 工作台（M4）
+## Streamlit 工作台（M4~M5）
 
 `avpo web` 启动，四个功能区，与 CLI 共用同一套 pipeline/状态机/数据目录：
 
 | 页面 | 功能 |
 |---|---|
 | 项目管理 | 项目卡片列表（进度/成本）+ 新建项目（标题/风格模板/渠道/音色） |
-| 流水线 | 5 节点状态徽章 + 单节点运行 + 一键全链路（阶段文字实时滚动）+ 错误记录 + 草稿 zip 下载 |
+| 流水线 | 5 节点状态徽章 + 单节点运行 + 一键全链路（M5：后台线程 + 真进度条，完成自动刷新）+ 错误记录 + 草稿 zip 下载 |
 | 分镜确认 | 逐场景编辑画面描述/生图提示词/运镜（文案只读 = 逐字不变量），保存后下游自动重置；确认后进入素材生成 |
 | 成本面板 | 总成本/预算 metric + 按场景/资产明细 + 超预算告警 |
 
+M5 后台任务模型：
+- 节点在 worker 线程执行，页面立即返回不再冻结；进度经线程安全容器（`app/web/tasks.py`）
+  传递，`st.fragment(run_every=1s)` 轮询渲染 st.progress（节点内百分比），完成自动刷新徽章；
+- 运行中所有运行按钮与分镜编辑/确认禁用（防双开与并发覆盖），失败/中止原因持久展示；
+- `ProjectStore.save` 加线程锁串行化 git 提交（防多浏览器会话并发写坏 git 索引）。
+
 说明：
-- 长任务（gen_assets 真实 API 约 1~2 分钟）为同步阻塞 + 阶段文字展示，运行中请勿重复点按钮；
 - `avpo web` 会把 streamlit 的磁盘缓存重定向到 `<数据目录>/webhome`，不写用户目录；
   手动 `streamlit run app/web/app.py` 需在仓库根执行，且缓存会落用户目录；
 - 工作台不引入新状态：所有操作走 `app/core/pipeline.py`，浏览器与 CLI 混用安全。
@@ -108,8 +113,9 @@ avpo web                                               # http://localhost:8501
 ┌─────────────── app/cli.py ───────────────┐
 │ new / run / status / cost / web / 单节点 │
 └──────┬───────────────────────────────────┘
-       │        ┌── app/web/app.py（Streamlit 工作台 M4）
+       │        ┌── app/web/app.py（Streamlit 工作台 M4+M5）
        │        │  项目管理 / 流水线 / 分镜确认 / 成本面板
+       │        │  app/web/tasks.py（后台任务 worker + 进度容器）
        │        ▼
        │ app/core/pipeline.py（节点编排，下游失效自动重跑）
 ┌──────▼──────┐ ┌───────────┐ ┌─────────────┐
@@ -137,13 +143,13 @@ data/projects/<pid>/project.json + assets/ + exports/<pid>_draft/
 ```
 AVPO/
 ├── app/
-│   ├── core/         # schema、store、状态机、pipeline、成本、错误分类、风格模板
+│   ├── core/         # schema、store、状态机、pipeline、成本、错误分类、风格模板、进度事件
 │   ├── director/     # AI 导演助手：文案 → 分镜（LLM 强制 JSON + 逐字校验）
 │   ├── tts/          # edge-tts 配音 + word 时间戳 + sidecar 缓存 → 字幕
 │   ├── vision/       # 生图（dashscope 千问 / siliconflow FLUX）+ prompt_hash 缓存
 │   ├── timeline/     # 时间线组装（场景时长 = 配音实际时长）
 │   ├── export/       # 剪映草稿生成（pyJianYingDraft 封装，模板字幕样式 + BGM）
-│   ├── web/          # Streamlit 工作台（M4：项目管理/流水线/分镜确认/成本面板）
+│   ├── web/          # Streamlit 工作台（M4：四功能区；M5：后台线程 + 真进度条）
 │   └── cli.py        # avpo 命令入口
 ├── templates/        # 风格模板 JSON（fast_talk / emotional / explainer）
 ├── data/             # 项目数据（独立 git 仓库，每次保存自动提交 = 免费版本历史）
@@ -159,6 +165,7 @@ AVPO/
 | M2 | 端到端管线（一键 run/并发提速）| 60s 口播全自动 ≤5min（实测 1.8min）| ✅ |
 | M3 | 健壮性（断点/成本/错误/模板）| 断点 0 重复调用、成本告警、3 模板回归、打开成功率 3/3 | ✅ |
 | M4 | Streamlit 工作台（阶段 1 第一步）| 四功能区（项目管理/流水线/分镜确认/成本面板）+ avpo web 启动器，171 测试全绿 | ✅ |
+| M5 | 工作台后台线程化 + 真进度条 | 结构化进度事件（五节点）+ worker 线程 + fragment 轮询 st.progress + 按钮防双开 + save 线程锁，183 测试全绿 | ✅ |
 
 完整方案见 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)、[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[SUMMARY.md](SUMMARY.md)、[docs/PROGRESS.md](docs/PROGRESS.md)。
 
@@ -174,4 +181,7 @@ pytest -m live                    # 真实链路（调用外部 API，按 .env �
 
 - 运镜：pan_left/pan_right 暂无剪映入场动画枚举，降级为静态（`none`），不影响成片；
 - BGM：需自备音频文件（`assets/bgm.mp3`），模板不携带素材；
-- 渠道 key 只放 `.env`，不入库（公开仓库规范）。
+- 渠道 key 只放 `.env`，不入库（公开仓库规范）；
+- 工作台单会话单任务（运行中不能开第二个任务/多项目并行）；`ProjectStore.save` 锁为进程内
+  锁，CLI 与 Web 同时跑同一数据目录时 git 提交不互斥；运行中关浏览器任务继续跑完落盘，
+  但进度条随会话丢失（重开看徽章终态）。
