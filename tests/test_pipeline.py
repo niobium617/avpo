@@ -3,6 +3,7 @@
 import pytest
 
 from app.core.pipeline import run_direct, run_gen_assets, update_scenes
+from app.core.progress import ProgressEvent
 from app.core.schema import PIPELINE_NODES, Project, Scene
 from app.tts.base import TTSResult, TTSWord
 from app.vision.base import PNG_MAGIC, ImageProvider
@@ -84,16 +85,19 @@ def test_update_scenes_rejects_duplicate_scene_id(store, sample_project):
         update_scenes(store, sample_project, scenes)
 
 
-# ---------------------------------------------------------------- 进度回调（M4）
+# ---------------------------------------------------------------- 进度回调（M4 引入，M5 结构化）
 
 def test_run_direct_progress_callback(store):
     project = Project(project_id="proj_p", title="进度回调")
     store.create(project)
-    msgs: list[str] = []
+    events: list[ProgressEvent] = []
 
-    assert run_direct(store, project, _FakeDirector(), "你好。", progress=msgs.append) is True
+    assert run_direct(store, project, _FakeDirector(), "你好。", progress=events.append) is True
 
-    assert msgs == ["调用 LLM 生成分镜…", "分镜生成完成（1 场景）"]
+    assert [(e.node, e.message, e.percent) for e in events] == [
+        ("direct", "调用 LLM 生成分镜…", 0.0),
+        ("direct", "分镜生成完成（1 场景）", 1.0),
+    ]
 
 
 def test_run_gen_assets_progress_callback(store):
@@ -102,13 +106,40 @@ def test_run_gen_assets_progress_callback(store):
         Scene(scene_id="s2", narration="世界。", visual="v2", image_prompt="p2"),
     ])
     store.create(project)
-    msgs: list[str] = []
+    events: list[ProgressEvent] = []
 
-    assert run_gen_assets(store, project, _FakeTTS(), _FakeImage(), progress=msgs.append) is True
+    assert run_gen_assets(store, project, _FakeTTS(), _FakeImage(), progress=events.append) is True
 
-    assert msgs[:2] == ["配音+字幕 1/2（s1）", "配音+字幕 2/2（s2）"]
-    # 生图段 2 张并发完成，顺序不定，只断集合
-    assert sorted(msgs[2:]) == ["生图 1/2", "生图 2/2"]
+    assert [(e.node, e.message, e.percent) for e in events[:2]] == [
+        ("gen_assets", "配音+字幕 1/2（s1）", pytest.approx(0.225)),
+        ("gen_assets", "配音+字幕 2/2（s2）", pytest.approx(0.45)),
+    ]
+    # 生图段 2 张并发完成，顺序不定：按消息排序后逐项断 percent
+    image_events = sorted(events[2:], key=lambda e: e.message)
+    assert [e.message for e in image_events] == ["生图 1/2", "生图 2/2"]
+    assert image_events[0].percent == pytest.approx(0.725)
+    assert image_events[1].percent == pytest.approx(1.0)
+
+
+def test_run_gen_assets_percent_monotonic_and_bounded(store):
+    """percent 分段契约：配音段 0~0.45 递增，生图段 0.45~1.0 递增，全部有界。"""
+    project = Project(project_id="proj_p", title="percent 契约", scenes=[
+        Scene(scene_id=f"s{i}", narration=f"第{i}句。", visual="v", image_prompt="p")
+        for i in range(1, 4)
+    ])
+    store.create(project)
+    events: list[ProgressEvent] = []
+
+    assert run_gen_assets(store, project, _FakeTTS(), _FakeImage(), progress=events.append) is True
+
+    assert all(e.percent is not None and 0.0 <= e.percent <= 1.0 for e in events)
+    voice = [e.percent for e in events if e.node == "gen_assets" and e.message.startswith("配音")]
+    image = [e.percent for e in events if e.node == "gen_assets" and e.message.startswith("生图")]
+    assert voice == sorted(voice) and len(set(voice)) == 3     # 严格递增
+    assert image == sorted(image) and len(set(image)) == 3
+    assert max(voice) < min(image)                             # 两阶段不重叠
+    assert voice[-1] == pytest.approx(0.45)
+    assert image[-1] == pytest.approx(1.0)
 
 
 def test_run_gen_assets_no_progress_still_works(store):

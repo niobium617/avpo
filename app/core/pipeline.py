@@ -23,9 +23,9 @@ M2-3.5 并发：配音+字幕阶段顺序执行（edge-tts 连续突发请求触
 
 import asyncio
 import time
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from app.core.progress import ProgressCallback, ProgressEvent
 from app.core.project import ProjectStore
 from app.core.schema import PIPELINE_NODES, Asset, Project, Scene
 from app.core.state import FatalError, run_task
@@ -49,15 +49,15 @@ def run_direct(
     project: Project,
     director: Director,
     text: str,
-    progress: Callable[[str], None] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> bool:
     """direct 节点：文案 → 分镜落盘（M3-4.4：按项目风格模板注入运镜指导）。
 
-    progress（M4）：阶段文字回调，供 UI 展示（CLI 不传，默认 None 向后兼容）。
+    progress（M5）：结构化进度事件回调，供 UI 展示（CLI 不传，默认 None 向后兼容）。
     """
     def fn(p: Project) -> None:
         if progress:
-            progress("调用 LLM 生成分镜…")
+            progress(ProgressEvent("direct", "调用 LLM 生成分镜…", 0.0))
         # 风格模板的运镜指导注入分镜提示词（fast_talk/emotional/explainer）
         scenes, cost = director.storyboard(text, motion_hint=load_style(p.config.style).motion_hint)
         share = round(cost / len(scenes), 6)
@@ -65,7 +65,7 @@ def run_direct(
             scene.cost["llm"] = share          # 一次调用成本均摊到各场景
         p.scenes = scenes
         if progress:
-            progress(f"分镜生成完成（{len(scenes)} 场景）")
+            progress(ProgressEvent("direct", f"分镜生成完成（{len(scenes)} 场景）", 1.0))
         _invalidate_downstream(p, "direct")
 
     return run_task(store, project, "direct", fn)
@@ -91,12 +91,14 @@ def run_gen_assets(
     project: Project,
     tts: TTSProvider,
     image: ImageProvider,
-    progress: Callable[[str], None] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> bool:
     """gen_assets 节点：逐场景生成配音段 + 字幕 + 图，归档入 assets/。
 
-    progress（M4）：阶段文字回调，供 UI 展示。生图段用 submit + as_completed，
-    主线程逐个取结果后回调 —— 进度回调绝不从工作线程发出（Streamlit 线程限制）。
+    progress（M5）：结构化进度事件回调。percent 分段：配音+字幕占节点 45%
+    （顺序执行，n 场景均分），生图占 55%（并发，按完成张数均分），末事件恰好 1.0。
+    生图段用 submit + as_completed，取结果后回调 —— 回调在 run_task 的调用线程发出
+    （M5 后即 worker 线程，回调只写线程安全容器，绝不调 st.*）。
     """
     def fn(p: Project) -> None:
         cache = ImageCache(store.project_dir(p.project_id))
@@ -108,15 +110,21 @@ def run_gen_assets(
                 time.sleep(_TTS_GAP_S)
             _gen_scene_voice(store, p, scene, tts)
             if progress:
-                progress(f"配音+字幕 {i + 1}/{len(p.scenes)}（{scene.scene_id}）")
+                progress(ProgressEvent(
+                    "gen_assets", f"配音+字幕 {i + 1}/{len(p.scenes)}（{scene.scene_id}）",
+                    0.45 * (i + 1) / len(p.scenes),
+                ))
         # 阶段 2：并发生图（慢操作，4 张并行；缓存命中 0 API 调用）
         if p.scenes:
             with ThreadPoolExecutor(max_workers=min(IMAGE_CONCURRENCY, len(p.scenes))) as pool:
                 futures = [pool.submit(_gen_scene_image, store, p, s, image) for s in p.scenes]
                 for done_n, fut in enumerate(as_completed(futures), 1):
-                    fut.result()                # 主线程取结果：异常冒泡给 run_task 重试
+                    fut.result()                # 调用线程取结果：异常冒泡给 run_task 重试
                     if progress:
-                        progress(f"生图 {done_n}/{len(p.scenes)}")
+                        progress(ProgressEvent(
+                            "gen_assets", f"生图 {done_n}/{len(p.scenes)}",
+                            0.45 + 0.55 * done_n / len(p.scenes),
+                        ))
         _invalidate_downstream(p, "gen_assets")
 
     return run_task(store, project, "gen_assets", fn)
@@ -186,7 +194,7 @@ def _gen_scene_image(
     scene.status = "done"
 
 
-def run_timeline(store: ProjectStore, project: Project) -> bool:
+def run_timeline(store: ProjectStore, project: Project, progress: ProgressCallback | None = None) -> bool:
     """timeline 节点：逐场景素材 → 全局时间轴（scene.start_ms + 双轨 + 总时长）。"""
     def fn(p: Project) -> None:
         # 前置依赖：素材链路必须已完成（图/配音资产在 gen_assets 里产出）
@@ -195,21 +203,29 @@ def run_timeline(store: ProjectStore, project: Project) -> bool:
                 f"gen_assets 未完成（{p.pipeline['gen_assets']}），无法组装时间线",
                 hint="先跑 avpo gen-assets",
             )
+        if progress:
+            progress(ProgressEvent("timeline", "组装时间线…", 0.0))
         build_timeline(p, store.project_dir(p.project_id))
+        if progress:
+            progress(ProgressEvent("timeline", f"时间线组装完成（{len(p.timeline.video)} 段视频轨）", 1.0))
         _invalidate_downstream(p, "timeline")
 
     return run_task(store, project, "timeline", fn)
 
 
-def run_confirm(store: ProjectStore, project: Project) -> bool:
+def run_confirm(store: ProjectStore, project: Project, progress: ProgressCallback | None = None) -> bool:
     """confirm 节点：分镜人工确认。fn 本身空转 —— CLI 已展示分镜并读到用户 y 才调用。"""
     def fn(p: Project) -> None:
-        pass
+        if progress:
+            progress(ProgressEvent("confirm", "分镜确认已记录", 1.0))
 
     return run_task(store, project, "confirm", fn)
 
 
-def run_export(store: ProjectStore, project: Project, *, zip_archive: bool = True) -> bool:
+def run_export(
+    store: ProjectStore, project: Project, *, zip_archive: bool = True,
+    progress: ProgressCallback | None = None,
+) -> bool:
     """export 节点：project → 剪映草稿目录（含 zip），写 project.export 状态。"""
     def fn(p: Project) -> None:
         if p.pipeline["timeline"] != "done":
@@ -217,10 +233,14 @@ def run_export(store: ProjectStore, project: Project, *, zip_archive: bool = Tru
                 f"timeline 未完成（{p.pipeline['timeline']}），无法导出",
                 hint="先跑 avpo timeline",
             )
+        if progress:
+            progress(ProgressEvent("export", "导出剪映草稿…", 0.0))
         project_dir = store.project_dir(p.project_id)
         draft_dir = export_draft(p, project_dir, project_dir / "exports", zip_archive=zip_archive)
         p.export.path = str(draft_dir.relative_to(project_dir)).replace("\\", "/")
         p.export.status = "done"
+        if progress:
+            progress(ProgressEvent("export", "导出完成", 1.0))
 
     return run_task(store, project, "export", fn)
 

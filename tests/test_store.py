@@ -1,6 +1,7 @@
 """M0-1.2 验收：ProjectStore —— 原子写 + 保存后 git log 有提交。"""
 
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -90,3 +91,33 @@ def test_list_projects_corrupt_json_raises_with_id(store: ProjectStore, sample_p
     store.json_path("proj_001").write_text("{ 损坏", encoding="utf-8")
     with pytest.raises(ValueError, match="proj_001"):
         store.list_projects()
+
+
+# ---- M5 6.1 save 线程锁（后台任务 + 多会话并发 save 串行化） ----
+
+def test_save_serialized_across_threads(store: ProjectStore, sample_project: Project) -> None:
+    """4 线程 × 3 次 save 并发：git 索引无竞争损坏，提交数与校验都正确。"""
+    store.create(sample_project)
+    errors: list[Exception] = []
+
+    def worker(tid: int) -> None:
+        for i in range(3):
+            try:
+                p = sample_project.model_copy(deep=True)
+                p.title = f"线程 {tid} 第 {i} 次"     # 每次制造差异保证产生提交
+                store.save(p, message=f"t{tid}-{i}")
+            except Exception as exc:  # noqa: BLE001 —— 并发下任何异常都记录并失败
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    # 1 次 create + 12 次 save，全部成功提交（锁串行化 git index，无丢失/交错）
+    assert len(git_log(store.data_dir).splitlines()) == 13
+    loaded = store.load("proj_001")                 # 最终文件合法且为某线程最后写入
+    assert loaded.title.startswith("线程 ")
+    assert loaded.project_id == "proj_001"

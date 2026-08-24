@@ -13,6 +13,7 @@
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -20,6 +21,11 @@ from pydantic import ValidationError
 from app.core.schema import Project
 
 TMP_SUFFIX = ".tmp"
+
+# M5：单进程内串行化「原子写 + git 提交」——git index 非线程安全，后台任务线程与
+# 多个浏览器会话并发 save 时会竞争损坏。跨进程（CLI 与 Web 同时跑）不受此锁保护，
+# 记为已知限制。
+_SAVE_LOCK = threading.Lock()
 
 
 class ProjectStore:
@@ -126,17 +132,18 @@ class ProjectStore:
 
     def save(self, project: Project, message: str | None = None) -> Project:
         """原子写 + git 提交。message 缺省时用 project_id 生成。"""
-        path = self.json_path(project.project_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        with _SAVE_LOCK:                        # 原子写与 git 提交一次持锁（create 也走 save）
+            path = self.json_path(project.project_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
 
-        text = json.dumps(project.model_dump(mode="json"), ensure_ascii=False, indent=2)
+            text = json.dumps(project.model_dump(mode="json"), ensure_ascii=False, indent=2)
 
-        # 原子写：先写 tmp 再替换，进程中途死亡不损坏 project.json
-        tmp = path.with_name(path.name + TMP_SUFFIX)
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
+            # 原子写：先写 tmp 再替换，进程中途死亡不损坏 project.json
+            tmp = path.with_name(path.name + TMP_SUFFIX)
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(path)
 
-        if self.git:
-            self.commit(message or f"{project.project_id}: 保存")
+            if self.git:
+                self.commit(message or f"{project.project_id}: 保存")
 
         return project

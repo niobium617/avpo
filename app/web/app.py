@@ -129,7 +129,7 @@ def _run_node(store: ProjectStore, project: Project, node: str, text: str = "") 
                     st.error(str(exc))
                     return False
                 ok = pipeline.run_direct(
-                    store, project, director, text, progress=lambda m: status.update(label=m)
+                    store, project, director, text, progress=lambda ev: status.update(label=ev.message)
                 )
             elif node == "confirm":
                 ok = pipeline.run_confirm(store, project)
@@ -141,7 +141,7 @@ def _run_node(store: ProjectStore, project: Project, node: str, text: str = "") 
                     return False
                 ok = pipeline.run_gen_assets(
                     store, project, EdgeTTS(project.config.tts), image,
-                    progress=lambda m: status.update(label=m),
+                    progress=lambda ev: status.update(label=ev.message),
                 )
             elif node == "timeline":
                 ok = pipeline.run_timeline(store, project)
@@ -169,7 +169,7 @@ def _run_full_chain(store: ProjectStore, project: Project, text: str) -> None:
             except KeyError as exc:
                 st.error(str(exc))
                 return
-            if not pipeline.run_direct(store, project, director, text, progress=lambda m: status.update(label=m)):
+            if not pipeline.run_direct(store, project, director, text, progress=lambda ev: status.update(label=ev.message)):
                 st.error(errors.describe_list(project.errors))
                 return
         if project.pipeline["confirm"] != "done":
@@ -183,7 +183,7 @@ def _run_full_chain(store: ProjectStore, project: Project, text: str) -> None:
                 return
             if not pipeline.run_gen_assets(
                 store, project, EdgeTTS(project.config.tts), image,
-                progress=lambda m: status.update(label=m),
+                progress=lambda ev: status.update(label=ev.message),
             ):
                 st.error(errors.describe_list(project.errors))
                 return

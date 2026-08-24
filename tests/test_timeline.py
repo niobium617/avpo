@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from app.core.pipeline import run_export, run_timeline
+from app.core.pipeline import run_confirm, run_export, run_timeline
+from app.core.progress import ProgressEvent
 from app.core.schema import (
     Asset,
     Project,
@@ -267,6 +268,65 @@ def test_run_export_success(store, tmp_path: Path, monkeypatch) -> None:
     assert project.pipeline["export"] == "done"
     assert project.export.status == "done"
     assert project.export.path == "exports/proj_tl_draft"
+
+
+# ---------------------------------------------------------------- 进度事件（M5）
+
+def test_run_timeline_progress_events(store, tmp_path: Path, monkeypatch) -> None:
+    project = _make_project()
+    project.pipeline["gen_assets"] = "done"
+    store.create(project)
+    _make_assets(store.project_dir(project.project_id))
+    _patch_durations(monkeypatch, {"vo_s1.mp3": 2400, "vo_s2.mp3": 1800})
+    events: list[ProgressEvent] = []
+
+    assert run_timeline(store, project, progress=events.append) is True
+
+    assert [(e.node, e.message, e.percent) for e in events] == [
+        ("timeline", "组装时间线…", 0.0),
+        ("timeline", "时间线组装完成（2 段视频轨）", 1.0),
+    ]
+
+
+def test_run_export_progress_events(store, tmp_path: Path, monkeypatch) -> None:
+    project = _make_project()
+    project.pipeline["gen_assets"] = "done"
+    store.create(project)
+    _make_assets(store.project_dir(project.project_id))
+    _patch_durations(monkeypatch, {"vo_s1.mp3": 2400, "vo_s2.mp3": 1800})
+    assert run_timeline(store, project) is True
+    events: list[ProgressEvent] = []
+
+    assert run_export(store, project, progress=events.append) is True
+
+    assert [(e.node, e.message, e.percent) for e in events] == [
+        ("export", "导出剪映草稿…", 0.0),
+        ("export", "导出完成", 1.0),
+    ]
+
+
+def test_run_confirm_progress_events(store) -> None:
+    project = _make_project()
+    store.create(project)
+    events: list[ProgressEvent] = []
+
+    assert run_confirm(store, project, progress=events.append) is True
+
+    assert [(e.node, e.message, e.percent) for e in events] == [
+        ("confirm", "分镜确认已记录", 1.0),
+    ]
+
+
+def test_run_export_writes_draft_and_zip(store, tmp_path: Path, monkeypatch) -> None:
+    """导出产物落盘：草稿目录含 draft_content.json + 同目录 zip。"""
+    project = _make_project()
+    project.pipeline["gen_assets"] = "done"
+    store.create(project)
+    _make_assets(store.project_dir(project.project_id))
+    _patch_durations(monkeypatch, {"vo_s1.mp3": 2400, "vo_s2.mp3": 1800})
+    assert run_timeline(store, project) is True
+    assert run_export(store, project) is True
+
     draft_dir = store.project_dir(project.project_id) / project.export.path
     assert (draft_dir / "draft_content.json").is_file()
     assert (draft_dir.with_suffix(".zip")).is_file()
