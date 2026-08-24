@@ -333,12 +333,14 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
 
         M4：把 streamlit 的磁盘缓存（硬编码 ~/.streamlit）重定向到
         <数据目录>/webhome —— 不在用户目录（C 盘）写任何文件。
+        M5 修复：经 app/web/run.py 启动（Windows 强制 SelectorEventLoop，
+        修 ProactorEventLoop accept 报 WinError 10014 的问题）。
         """
         web_home = resolve_data_dir() / "webhome"
         web_home.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, "USERPROFILE": str(web_home), "HOME": str(web_home)}
         cmd = [
-            sys.executable, "-m", "streamlit", "run",
+            sys.executable, "-m", "app.web.run", "run",
             str(PROJECT_ROOT / "app" / "web" / "app.py"),
             "--server.port", str(port),
             "--server.headless", "true",
