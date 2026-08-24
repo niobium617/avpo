@@ -125,6 +125,32 @@ def test_create_project_form(at: AppTest) -> None:
     assert at.sidebar.selectbox(key="pid").value == "proj_ui"
 
 
+def test_create_second_project_auto_selects(at: AppTest) -> None:
+    """回归：已有项目时 selectbox(key=pid) 已实例化，再建项目不得写 widget key 崩溃。"""
+    _mk_project(pid="proj_a")
+    at.run()
+    at.text_input(key="new_pid").set_value("proj_b")
+    at.button(key="btn_create").click()
+    at.run()
+
+    assert not at.exception
+    assert _store().exists("proj_b")
+    assert at.sidebar.selectbox(key="pid").value == "proj_b"
+
+
+def test_pick_button_switches_project(at: AppTest) -> None:
+    """回归：项目卡片「选择」按钮经 pending_pid 预设，不直写 widget key。"""
+    _mk_project(pid="proj_a")
+    _mk_project(pid="proj_b")
+    at.run()
+
+    at.button(key="pick_proj_b").click()
+    at.run()
+
+    assert not at.exception
+    assert at.sidebar.selectbox(key="pid").value == "proj_b"
+
+
 # ---------------------------------------------------------------- 页面 2：流水线
 
 def test_run_all_calls_nodes_in_order(at: AppTest, monkeypatch) -> None:

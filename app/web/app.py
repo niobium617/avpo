@@ -88,7 +88,7 @@ def _render_new_project_form(store: ProjectStore) -> None:
             except FileExistsError:
                 st.error(f"项目已存在: {pid}")
             else:
-                st.session_state.pid = pid
+                st.session_state["pending_pid"] = pid   # 选中项经 sidebar 预设（pid 是 widget key，不可直写）
                 st.success(f"项目已创建: {pid}")
                 st.rerun()
 
@@ -113,7 +113,7 @@ def _render_projects(store: ProjectStore) -> None:
             cols[2].caption(f"渠道: {p.config.image.provider}")
             cols[3].caption(f"成本 ¥{summarize(p).total:.3f}")
             if cols[4].button("选择", key=f"pick_{pid}"):
-                st.session_state.pid = pid
+                st.session_state["pending_pid"] = pid   # 选中项经 sidebar 预设（pid 是 widget key，不可直写）
                 st.rerun()
             st.progress(done_n / len(PIPELINE_NODES), text=f"进度 {done_n}/{len(PIPELINE_NODES)} done")
 
@@ -338,6 +338,11 @@ def main() -> None:
         section = st.radio("功能", ["项目管理", "流水线", "分镜确认", "成本面板"], key="section")
         ids = store.list_project_ids()
         if ids:
+            # 创建/「选择」按钮改写的选中项：必须在 selectbox（widget key=pid）实例化
+            # 之前预设，否则报 "cannot be modified after the widget ... is instantiated"
+            pending = st.session_state.pop("pending_pid", None)
+            if pending in ids:
+                st.session_state["pid"] = pending
             if st.session_state.get("pid") not in ids:   # 会话 pid 已被删除 → 守卫
                 st.session_state.pop("pid", None)
             st.selectbox("项目", ids, key="pid",
