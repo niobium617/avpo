@@ -1,20 +1,25 @@
-"""M4-5.3~5.6 验收：Streamlit 工作台四页 AppTest 全流程。
+"""M4-5.3~5.6 验收：Streamlit 工作台四页 AppTest 全流程。M5-6.2 起后台任务异步模式。
 
 约定：
 - AVPO_DATA 环境变量必须在首次 at.run() 之前设置（脚本每次执行都读它）；
 - 工作台脚本对 core 走模块引用（pipeline.run_*），monkeypatch 按 app.core.* 模块属性打补丁；
 - widget 改动后必须显式 at.run()（AppTest 不自动重跑）；
-- 全链路节点全 mock，无真实 API 等待。
+- 全链路节点全 mock，无真实 API 等待；
+- M5 后台任务：点击按钮后 worker 线程异步执行，测试用 _wait_task 等容器 done Event，
+  再 at.run() 让进度 fragment 消费任务（st.rerun 链在同一 run 内处理）。
 """
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from app.core.progress import ProgressEvent
 from app.core.project import ProjectStore
-from app.core.schema import Project, Scene
+from app.core.schema import PipelineError, Project, Scene
 
 APP = Path(__file__).resolve().parents[1] / "app" / "web" / "app.py"
 
@@ -77,6 +82,24 @@ def _mock_pipeline(monkeypatch) -> list[str]:
     return calls
 
 
+def _ss(at: AppTest, key: str):
+    """AppTest 的 SafeSessionState 没有 .get：用 in + [] 读取。"""
+    return at.session_state[key] if key in at.session_state else None
+
+
+def _wait_task(at: AppTest, timeout: float = 10.0) -> None:
+    """等待后台任务完成。worker 线程独立于脚本线程：直接等容器的 done Event。
+
+    mock 秒回时任务可能已被同一次 at.run() 里的 fragment 消费（task 为 None）——
+    此时断言结果区已生成即视为任务跑完。
+    """
+    task = _ss(at, "task")
+    if task is None:
+        assert _ss(at, "task_result") is not None, "未启动后台任务也无结果"
+        return
+    assert task.done.wait(timeout), f"后台任务 {task.node} 超时（state={task.state}）"
+
+
 # ---------------------------------------------------------------- 页面 1：项目管理
 
 def test_empty_data_dir_shows_create_form(at: AppTest) -> None:
@@ -112,12 +135,16 @@ def test_run_all_calls_nodes_in_order(at: AppTest, monkeypatch) -> None:
     _goto(at, "流水线", pid="proj_ui")
     at.button(key="run_all_proj_ui").click()
     at.run()
+    _wait_task(at)
+    at.run()                                                    # fragment 消费任务 + 刷新
 
     assert not at.exception
     assert calls == ["gen_assets", "timeline", "export"]
     # 全链路后 pipeline 全 done（节点 mock 落盘 + rerun 后徽章状态）
     loaded = _store().load("proj_ui")
     assert all(v == "done" for v in loaded.pipeline.values())
+    assert _ss(at, "task") is None                 # 任务已消费
+    assert any("chain 完成" in s.value for s in at.success)
 
 
 def test_run_all_stops_at_unconfirmed(at: AppTest, monkeypatch) -> None:
@@ -132,6 +159,7 @@ def test_run_all_stops_at_unconfirmed(at: AppTest, monkeypatch) -> None:
     assert not at.exception
     assert calls == []                                          # 未确认 → 中断，不跑任何节点
     assert any("分镜待确认" in w.value for w in at.warning)
+    assert _ss(at, "task") is None                 # 未启动任务
 
 
 def test_single_node_buttons(at: AppTest, monkeypatch) -> None:
@@ -142,11 +170,184 @@ def test_single_node_buttons(at: AppTest, monkeypatch) -> None:
     _goto(at, "流水线", pid="proj_ui")
     at.button(key="run_tl_proj_ui").click()
     at.run()
+    _wait_task(at)
+    at.run()
     at.button(key="run_exp_proj_ui").click()
+    at.run()
+    _wait_task(at)
     at.run()
 
     assert not at.exception
     assert calls == ["timeline", "export"]
+
+
+# ---------------------------------------------------------------- M5 后台任务
+
+def test_node_run_is_non_blocking_with_live_progress(at: AppTest, monkeypatch) -> None:
+    """核心验收：点击后主脚本立即返回（不阻塞），运行中按钮禁用，完成后恢复并落盘。"""
+    calls = _mock_pipeline(monkeypatch)
+    started = threading.Event()
+
+    def slow_timeline(store, p, progress=None):
+        calls.append("timeline")
+        started.set()
+        time.sleep(2.0)
+        p.pipeline["timeline"] = "done"
+        store.save(p, message="web 测试 timeline")
+        return True
+
+    monkeypatch.setattr("app.core.pipeline.run_timeline", slow_timeline)
+    _mk_project(pipeline={"direct": "done", "confirm": "done", "gen_assets": "done"})
+
+    at.run()
+    _goto(at, "流水线", pid="proj_ui")
+    at.button(key="run_tl_proj_ui").click()
+    at.run()                                    # 若主脚本阻塞，30s 超时抛错 —— 秒回即证非阻塞
+    at.run()                                    # busy 在 run 顶部计算：再跑一次才渲染禁用态
+
+    assert not at.exception
+    assert at.session_state["task"].state == "running"
+    assert at.button(key="run_tl_proj_ui").disabled is True     # 运行中禁用
+    assert at.button(key="run_all_proj_ui").disabled is True
+    assert started.wait(1.0)                    # worker 真在跑（2s 慢 mock 未完成）
+    _wait_task(at)
+    at.run()                                    # fragment 消费 + 刷新
+
+    assert _ss(at, "task") is None
+    assert any("timeline 完成" in s.value for s in at.success)
+    assert at.button(key="run_tl_proj_ui").disabled is False    # 完成恢复
+    assert _store().load("proj_ui").pipeline["timeline"] == "done"
+
+
+def test_double_start_prevention(at: AppTest, monkeypatch) -> None:
+    """运行中所有按钮禁用：点不动的按钮不会开出第二个任务。"""
+    calls = _mock_pipeline(monkeypatch)
+
+    def slow_timeline(store, p, progress=None):
+        calls.append("timeline")
+        time.sleep(1.0)
+        p.pipeline["timeline"] = "done"
+        store.save(p, message="web 测试 timeline")
+        return True
+
+    monkeypatch.setattr("app.core.pipeline.run_timeline", slow_timeline)
+    _mk_project(pipeline={"direct": "done", "confirm": "done", "gen_assets": "done"})
+
+    at.run()
+    _goto(at, "流水线", pid="proj_ui")
+    at.button(key="run_tl_proj_ui").click()
+    at.run()
+    at.run()                                    # 再跑一次仍在运行：按钮保持禁用
+
+    assert at.button(key="run_exp_proj_ui").disabled is True
+    at.button(key="run_exp_proj_ui").click()    # 点禁用按钮：不触发回调
+    at.run()
+    _wait_task(at)
+    at.run()
+
+    assert not at.exception
+    assert calls == ["timeline"]                # 未双开
+
+
+def test_node_failure_path(at: AppTest, monkeypatch) -> None:
+    """节点失败：错误进容器 → 消费后持久错误区展示，落盘 failed，按钮恢复。"""
+    _mock_pipeline(monkeypatch)
+
+    def fake_fail(store, p, tts, image, progress=None):
+        p.pipeline["gen_assets"] = "failed"
+        p.errors.append(PipelineError(node="gen_assets", error="测试失败", kind="UNKNOWN", hint=""))
+        store.save(p, message="web 测试失败")
+        return False
+
+    monkeypatch.setattr("app.core.pipeline.run_gen_assets", fake_fail)
+    _mk_project(scenes=SCENES, pipeline={"direct": "done", "confirm": "done"})
+
+    at.run()
+    _goto(at, "流水线", pid="proj_ui")
+    at.button(key="run_gen_proj_ui").click()
+    at.run()
+    _wait_task(at)
+    at.run()
+
+    assert not at.exception
+    assert any("测试失败" in e.value for e in at.error)
+    assert _ss(at, "task") is None
+    assert _store().load("proj_ui").pipeline["gen_assets"] == "failed"
+    assert at.button(key="run_gen_proj_ui").disabled is False
+
+
+def test_chain_aborted_missing_text(at: AppTest, monkeypatch) -> None:
+    """一键全链路缺文案：worker aborted 分支，警告持久展示，无节点运行。"""
+    calls = _mock_pipeline(monkeypatch)
+    _mk_project(scenes=SCENES, pipeline={"confirm": "done"})   # direct 待跑、文案留空
+
+    at.run()
+    _goto(at, "流水线", pid="proj_ui")
+    at.button(key="run_all_proj_ui").click()
+    at.run()
+    _wait_task(at)
+    at.run()
+
+    assert not at.exception
+    assert calls == []
+    assert any("direct 未完成" in w.value for w in at.warning)
+    assert _ss(at, "task") is None
+
+
+def test_progress_events_recorded(at: AppTest, monkeypatch) -> None:
+    """worker 进度事件进容器：消费前断言事件序列完整（AppTest 无 progress 元素类）。"""
+    _mock_pipeline(monkeypatch)
+
+    def fake_gen(store, p, tts, image, progress=None):
+        for msg, pct in [("配音 1/2", 0.25), ("配音 2/2", 0.5), ("生图完成", 1.0)]:
+            progress(ProgressEvent(node="gen_assets", message=msg, percent=pct))
+        time.sleep(0.3)                         # 确保点击 run 时 fragment 读到 running
+        p.pipeline["gen_assets"] = "done"
+        store.save(p, message="web 测试 gen_assets")
+        return True
+
+    monkeypatch.setattr("app.core.pipeline.run_gen_assets", fake_gen)
+    _mk_project(scenes=SCENES, pipeline={"direct": "done", "confirm": "done"})
+
+    at.run()
+    _goto(at, "流水线", pid="proj_ui")
+    at.button(key="run_gen_proj_ui").click()
+    at.run()
+    _wait_task(at)
+
+    task = at.session_state["task"]
+    assert task is not None                    # 尚未被消费（sleep 保证 running 窗口）
+    assert [(e.message, e.percent) for e in task.events] == [
+        ("配音 1/2", 0.25), ("配音 2/2", 0.5), ("生图完成", 1.0),
+    ]
+    at.run()                                    # 消费
+    assert _ss(at, "task") is None
+
+
+def test_task_container_cleaned_between_tasks(at: AppTest, monkeypatch) -> None:
+    """前一任务消费后能立刻开下一任务：task_result 清空、新容器正常。"""
+    _mock_pipeline(monkeypatch)
+    _mk_project(pipeline={"direct": "done", "confirm": "done"})
+
+    at.run()
+    _goto(at, "流水线", pid="proj_ui")
+    at.button(key="run_tl_proj_ui").click()
+    at.run()
+    _wait_task(at)
+    at.run()                                    # 消费 timeline → task_result 有值
+
+    at.button(key="run_exp_proj_ui").click()
+    at.run()                                    # 启动 export：清 task_result、新容器
+
+    assert not at.exception
+    assert _ss(at, "task_result") is None
+    assert _ss(at, "task") is not None
+    _wait_task(at)
+    at.run()
+
+    assert _ss(at, "task") is None
+    assert any("export 完成" in s.value for s in at.success)
+    assert _store().load("proj_ui").pipeline["export"] == "done"
 
 
 # ---------------------------------------------------------------- 页面 3：分镜确认

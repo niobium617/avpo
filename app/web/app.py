@@ -9,13 +9,17 @@
 - 单文件 + 侧边栏 radio 导航（AppTest 一次只测一个入口脚本）；
 - 所有 core 调用走模块引用（pipeline.run_direct / providers.make_image），
   AppTest 按 app.core.* 模块属性 monkeypatch 才能命中；
-- 长任务同步阻塞 + st.status 阶段文字（M4 接受；progress 参数为线程化预留）；
+- M5 后台任务模型：节点在 worker 线程执行（主脚本立即返回），进度经
+  app/web/tasks.py 的 TaskContainer（Lock 保护）传递；UI 用
+  @st.fragment(run_every=1.0) 轮询渲染 st.progress，完成自动 st.rerun 刷新徽章；
+  worker 线程绝不调 st.* / 绝不碰 st.session_state；
 - widget key 带项目 id 前缀，切换项目不残留旧项目脏值。
 """
 
 import streamlit as st
 
 from app.core import env, errors, pipeline, providers, styles
+from app.web import tasks
 from app.core.cost import DEFAULT_BUDGET, summarize
 from app.core.project import ProjectStore
 from app.core.schema import PIPELINE_NODES, MotionKind, Project
@@ -118,85 +122,6 @@ def _render_projects(store: ProjectStore) -> None:
 
 # ---------------------------------------------------------------- 页面 2：流水线
 
-def _run_node(store: ProjectStore, project: Project, node: str, text: str = "") -> bool:
-    """跑单节点：成功 st.rerun 刷新徽章，失败展示错误不 rerun。"""
-    with st.status(f"运行 {node}…", expanded=True) as status:
-        try:
-            if node == "direct":
-                try:
-                    director = providers.make_director(project.config.llm)
-                except KeyError as exc:
-                    st.error(str(exc))
-                    return False
-                ok = pipeline.run_direct(
-                    store, project, director, text, progress=lambda ev: status.update(label=ev.message)
-                )
-            elif node == "confirm":
-                ok = pipeline.run_confirm(store, project)
-            elif node == "gen_assets":
-                try:
-                    image = providers.make_image(project.config.image)
-                except KeyError as exc:
-                    st.error(str(exc))
-                    return False
-                ok = pipeline.run_gen_assets(
-                    store, project, EdgeTTS(project.config.tts), image,
-                    progress=lambda ev: status.update(label=ev.message),
-                )
-            elif node == "timeline":
-                ok = pipeline.run_timeline(store, project)
-            else:  # export
-                ok = pipeline.run_export(store, project)
-        except Exception as exc:  # noqa: BLE001 —— 节点异常不崩页面
-            st.error(f"{node} 异常: {exc}")
-            return False
-    if ok:
-        st.success(f"{node} 完成")
-        st.rerun()
-    st.error(f"{node} 失败: {errors.describe_list(project.errors)}")
-    return False
-
-
-def _run_full_chain(store: ProjectStore, project: Project, text: str) -> None:
-    """一键全链路，镜像 CLI run 语义：done 跳过；confirm 未确认则提示去分镜页。"""
-    with st.status("一键全链路 direct→confirm→gen_assets→timeline→export", expanded=True) as status:
-        if project.pipeline["direct"] != "done":
-            if not text.strip():
-                st.error("direct 未完成：请先填写口播文案，或单独运行 direct")
-                return
-            try:
-                director = providers.make_director(project.config.llm)
-            except KeyError as exc:
-                st.error(str(exc))
-                return
-            if not pipeline.run_direct(store, project, director, text, progress=lambda ev: status.update(label=ev.message)):
-                st.error(errors.describe_list(project.errors))
-                return
-        if project.pipeline["confirm"] != "done":
-            st.warning("分镜待确认：请到「分镜确认」页确认后，再点击一键全链路")
-            return
-        if project.pipeline["gen_assets"] != "done":
-            try:
-                image = providers.make_image(project.config.image)
-            except KeyError as exc:
-                st.error(str(exc))
-                return
-            if not pipeline.run_gen_assets(
-                store, project, EdgeTTS(project.config.tts), image,
-                progress=lambda ev: status.update(label=ev.message),
-            ):
-                st.error(errors.describe_list(project.errors))
-                return
-        if not pipeline.run_timeline(store, project):
-            st.error(errors.describe_list(project.errors))
-            return
-        if not pipeline.run_export(store, project):
-            st.error(errors.describe_list(project.errors))
-            return
-    st.success("全链路完成，草稿已导出")
-    st.rerun()
-
-
 def _render_export_output(store: ProjectStore, project: Project) -> None:
     if project.export.status == "done" and project.export.path:
         st.success(f"剪映草稿已导出: {project.export.path}")
@@ -206,9 +131,86 @@ def _render_export_output(store: ProjectStore, project: Project) -> None:
             st.download_button(f"下载 {zp.name}", f.read(), file_name=zp.name, key=f"dl_{zp.name}")
 
 
+# ---------------------------------------------------------------- 后台任务（M5）
+
+def _start_node(store: ProjectStore, project: Project, node: str, text: str = "") -> None:
+    """启动单节点后台任务：主脚本立即返回，worker 线程执行 pipeline。"""
+    if st.session_state.get("task") is not None:      # 双开兜底（按钮禁用为主防线）
+        st.warning("已有后台任务运行中，请等待完成")
+        return
+    container = tasks.start_task(store, project, node, text)
+    st.session_state["task"] = container
+    st.session_state.pop("task_result", None)
+
+
+def _start_chain(store: ProjectStore, project: Project, text: str) -> None:
+    """一键全链路：confirm 未确认在 UI 前置拦截（与现行为一致），其余交给 worker。"""
+    if project.pipeline["confirm"] != "done":
+        st.warning("分镜待确认：请到「分镜确认」页确认后，再点击一键全链路")
+        return
+    if st.session_state.get("task") is not None:
+        st.warning("已有后台任务运行中，请等待完成")
+        return
+    container = tasks.start_task(store, project, "", chain=True)
+    st.session_state["task"] = container
+    st.session_state.pop("task_result", None)
+
+
+@st.fragment(run_every=1.0)
+def _render_task_progress() -> None:
+    """后台任务进度轮询 UI（M5）。
+
+    语义（已核实 1.62）：fragment 函数体在全页 run 时内联执行，AppTest 每次
+    at.run() 都会执行；run_every 的自动重跑由前端 timer 驱动，真实运行 ~1s
+    轮询一次，测试里用 at.run() 手动驱动。
+    完成分支：先删任务再 st.rerun()（默认 scope="app"，fragment 内合法）——
+    防止下一轮全页 run 再次触发 rerun 死循环。
+    """
+    task = st.session_state.get("task")
+    if task is None:
+        return
+    state, events, error = task.snapshot()
+    last = events[-1] if events else None
+    st.caption(f"后台任务：{task.node}")
+    if state == "running":
+        if last is not None and last.percent is not None:
+            st.progress(min(last.percent, 1.0), text=last.message)
+        else:
+            st.progress(0.0, text=last.message if last else "启动中…")
+        return                                        # 运行中：不消费、不 rerun
+    st.progress(1.0 if state == "done" else 0.0, text=last.message if last else "")
+    if state == "done":
+        st.success(f"{task.node} 完成")
+        result = (task.node, "done", "")
+    elif state == "aborted":
+        st.warning(error)
+        result = (task.node, "aborted", error)
+    else:
+        st.error(f"{task.node} 失败: {error}")
+        result = (task.node, "failed", error)
+    del st.session_state["task"]                      # 只消费一次
+    st.session_state["task_result"] = result          # 持久结果（主脚本区渲染）
+    st.rerun()                                        # scope="app"：刷新徽章/按钮/错误区
+
+
+def _render_task_result() -> None:
+    """上次后台任务的持久结果区（替代原 st.success/st.error 瞬态分支）。"""
+    result = st.session_state.get("task_result")
+    if not result:
+        return
+    node, state, error = result
+    if state == "done":
+        st.success(f"{node} 完成")
+    elif state == "aborted":
+        st.warning(error)
+    else:
+        st.error(f"{node} 失败: {error}")
+
+
 def _render_pipeline(store: ProjectStore, project: Project) -> None:
     st.header(f"流水线 「{project.title or project.project_id}」")
     pid = project.project_id
+    busy = st.session_state.get("task") is not None
     cols = st.columns(len(PIPELINE_NODES))
     for col, node in zip(cols, PIPELINE_NODES):
         status = project.pipeline[node]
@@ -225,20 +227,22 @@ def _render_pipeline(store: ProjectStore, project: Project) -> None:
 
     st.divider()
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    if c1.button("运行 direct", key=f"run_direct_{pid}"):
-        _run_node(store, project, "direct", text=text)
-    if c2.button("运行 gen_assets", key=f"run_gen_{pid}"):
-        _run_node(store, project, "gen_assets")
-    if c3.button("运行 timeline", key=f"run_tl_{pid}"):
-        _run_node(store, project, "timeline")
-    if c4.button("运行 export", key=f"run_exp_{pid}"):
-        _run_node(store, project, "export")
+    if c1.button("运行 direct", key=f"run_direct_{pid}", disabled=busy):
+        _start_node(store, project, "direct", text=text)
+    if c2.button("运行 gen_assets", key=f"run_gen_{pid}", disabled=busy):
+        _start_node(store, project, "gen_assets")
+    if c3.button("运行 timeline", key=f"run_tl_{pid}", disabled=busy):
+        _start_node(store, project, "timeline")
+    if c4.button("运行 export", key=f"run_exp_{pid}", disabled=busy):
+        _start_node(store, project, "export")
     c5.caption("confirm 在「分镜确认」页")
-    if c6.button("一键全链路", type="primary", key=f"run_all_{pid}"):
-        _run_full_chain(store, project, text)
+    if c6.button("一键全链路", type="primary", key=f"run_all_{pid}", disabled=busy):
+        _start_chain(store, project, text)
 
+    _render_task_result()
     _render_errors(project)
     _render_export_output(store, project)
+    _render_task_progress()                           # 注册并内联执行进度 fragment（放最后）
 
 
 # ---------------------------------------------------------------- 页面 3：分镜确认
@@ -246,6 +250,7 @@ def _render_pipeline(store: ProjectStore, project: Project) -> None:
 def _render_storyboard(store: ProjectStore, project: Project) -> None:
     st.header("分镜确认")
     pid = project.project_id
+    busy = st.session_state.get("task") is not None      # 运行中禁改分镜：防 worker 副本覆盖
     if project.pipeline["confirm"] == "done":
         st.success("分镜已确认。若修改分镜，将重置为待确认，需重新确认。")
     if not project.scenes:
@@ -273,7 +278,7 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
                 s.model_copy(update={"visual": visual, "image_prompt": prompt, "motion": motion})
             )
 
-    if st.button("保存全部修改", key=f"save_scenes_{pid}", disabled=not edited):
+    if st.button("保存全部修改", key=f"save_scenes_{pid}", disabled=not edited or busy):
         try:
             pipeline.update_scenes(store, project, new_scenes)
         except ValueError as exc:
@@ -286,7 +291,7 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
             st.rerun()
 
     if project.pipeline["confirm"] != "done":
-        if st.button("确认分镜（进入素材生成）", type="primary", key=f"confirm_{pid}"):
+        if st.button("确认分镜（进入素材生成）", type="primary", key=f"confirm_{pid}", disabled=busy):
             if pipeline.run_confirm(store, project):
                 st.success("已确认")
                 st.rerun()
