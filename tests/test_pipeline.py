@@ -12,7 +12,7 @@ from app.vision.base import PNG_MAGIC, ImageProvider
 class _FakeDirector:
     """假导演：把文案原样做成 1 个场景（校验 narration 拼接=原文可通过）。"""
 
-    def storyboard(self, text, motion_hint=""):
+    def storyboard(self, text, motion_hint="", *, brief=None, shot_size_hint=""):
         return [
             Scene(scene_id="s1", narration=text, visual="旧画面", image_prompt="old prompt", motion="none")
         ], 0.001

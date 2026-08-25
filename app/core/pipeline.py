@@ -58,8 +58,14 @@ def run_direct(
     def fn(p: Project) -> None:
         if progress:
             progress(ProgressEvent("direct", "调用 LLM 生成分镜…", 0.0))
-        # 风格模板的运镜指导注入分镜提示词（fast_talk/emotional/explainer）
-        scenes, cost = director.storyboard(text, motion_hint=load_style(p.config.style).motion_hint)
+        # M6-7.3：风格模板运镜/景别指导 + 创作简报（Brief）注入分镜提示词
+        style = load_style(p.config.style)
+        scenes, cost = director.storyboard(
+            text,
+            motion_hint=style.motion_hint,
+            brief=p.brief,
+            shot_size_hint=style.shot_size_hint,
+        )
         share = round(cost / len(scenes), 6)
         for scene in scenes:
             scene.cost["llm"] = share          # 一次调用成本均摊到各场景

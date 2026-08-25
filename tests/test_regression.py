@@ -33,7 +33,7 @@ class FakeDirector:
     def __init__(self):
         self.hints: list[str] = []
 
-    def storyboard(self, text: str, motion_hint: str = ""):
+    def storyboard(self, text: str, motion_hint: str = "", *, brief=None, shot_size_hint=""):
         self.hints.append(motion_hint)
         return [
             Scene(scene_id="s1", narration="今天聊聊 AI 视频。", visual="v1", image_prompt="p1"),
