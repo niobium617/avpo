@@ -6,12 +6,21 @@ make_director / make_image 按 project.config 的 provider 组装实现类；
 """
 
 import os
+from dataclasses import dataclass
 
 from app.core.schema import ImageConfig, LLMConfig, ProjectConfig
 from app.director.director import Director
 from app.vision.base import ImageProvider
 from app.vision.flux import FluxImage
 from app.vision.qwen import QwenImage
+
+
+@dataclass(frozen=True)
+class ImageCapabilities:
+    """渠道图像能力（M6-7.4 无 key 内省 —— UI 按渠道自适应，不实例化）。"""
+
+    supports_reference_image: bool
+    max_reference_images: int
 
 CHANNELS: dict[str, dict] = {
     "siliconflow": {
@@ -63,13 +72,29 @@ def make_director(config: LLMConfig, env: dict | None = None) -> Director:
     return Director(api_key=key, model=config.model, base_url=CHANNELS[config.provider]["llm_base"])
 
 
+def _image_class(provider: str) -> type[ImageProvider]:
+    """渠道 → 生图实现类（M6-7.4 抽出来供能力内省复用）。"""
+    if provider == "siliconflow":
+        return FluxImage
+    if provider == "dashscope":
+        return QwenImage
+    raise ValueError(f"未知渠道: {provider}")
+
+
 def make_image(config: ImageConfig, env: dict | None = None) -> ImageProvider:
     key = resolve_key(config.provider, env)
     _check_model(config.provider, config.model, "image")
-    base = CHANNELS[config.provider]["image_base"]
-    if config.provider == "siliconflow":
-        return FluxImage(api_key=key, base_url=base)
-    return QwenImage(api_key=key, base_url=base)
+    cls = _image_class(config.provider)
+    return cls(api_key=key, base_url=CHANNELS[config.provider]["image_base"])
+
+
+def image_capabilities(config: ImageConfig) -> ImageCapabilities:
+    """渠道图像能力（无需 API key 的类属性内省）。"""
+    cls = _image_class(config.provider)
+    return ImageCapabilities(
+        supports_reference_image=cls.supports_reference_image,
+        max_reference_images=cls.max_reference_images,
+    )
 
 
 def config_for_provider(provider: str) -> ProjectConfig:
