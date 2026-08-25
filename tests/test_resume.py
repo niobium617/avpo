@@ -66,9 +66,17 @@ def project() -> Project:
 
 
 def _rerun(store, project) -> tuple[FakeTTS, FakeImage]:
-    """模拟 kill -9 后重开：重新 load，节点置回 running，重跑 gen_assets。"""
-    project.pipeline["gen_assets"] = "running"      # kill -9 时落在 running
-    store.save(project, message="kill -9 模拟")
+    """模拟 kill -9 后重开：从盘上最新状态重跑 gen_assets（不拿内存旧对象覆盖）。
+
+    M6-7.5 起候选 seed 存于 project.assets —— 重跑必须读盘上状态才能命中缓存键；
+    首次（尚未落盘）以传入对象为初始状态。
+    """
+    try:
+        base = store.load(project.project_id)
+    except FileNotFoundError:
+        base = project
+    base.pipeline["gen_assets"] = "running"         # kill -9 时落在 running
+    store.save(base, message="kill -9 模拟")
     loaded = store.load(project.project_id)
     tts, image = FakeTTS(), FakeImage()
     ok = run_gen_assets(store, loaded, tts=tts, image=image)
@@ -80,13 +88,13 @@ def test_full_run_then_rerun_zero_api_calls(store, project):
     ok, tts, image = _rerun(store, project)
     assert ok
     assert tts.synth_calls == 2                     # 第一次跑：2 场景都合成
-    assert image.api_calls == 2                     # 第一次跑：2 张图都生成
+    assert image.api_calls == 6                     # 第一次跑：2 场景 × 3 候选图
 
     sub_count = len(store.load("proj_resume").subtitles)
     ok, tts, image = _rerun(store, project)
     assert ok
     assert tts.synth_calls == 0                     # kill -9 重跑：0 次重复配音
-    assert image.api_calls == 0                     # kill -9 重跑：0 次重复生图
+    assert image.api_calls == 0                     # kill -9 重跑：候选 seed 复用，0 次重复生图
     assert len(store.load("proj_resume").subtitles) == sub_count
 
 
@@ -111,17 +119,21 @@ def test_killed_midway_voice_resumes_remaining(store, project):
 
 
 def test_killed_midway_image_resumes_remaining(store, project):
-    """kill -9 在生图中途（s2 图缓存未写）：只补 s2 图，配音 0 次重复。"""
+    """kill -9 在生图中途（s2 候选图缓存未写）：只补 s2 的候选，配音 0 次重复。"""
     ok, tts, image = _rerun(store, project)
     assert ok
     loaded = store.load("proj_resume")
     project_dir = store.project_dir("proj_resume")
 
-    # 删掉 s2 图缓存与资产条目：模拟"进程死在写 s2 图之前"
-    h = prompt_hash("p2 desk", loaded.config.image.model, loaded.config.image.size)
-    for f in (f".cache/{h}.png", f".cache/{h}.json"):
-        (project_dir / f).unlink()
-    loaded.assets.pop("img_s2")
+    # 删掉 s2 全部候选图缓存与资产条目：模拟"进程死在写 s2 图之前"
+    scene2 = loaded.scenes[1]
+    for cid in scene2.image_candidates:
+        seed = loaded.assets[cid].seed
+        h = prompt_hash(scene2.image_prompt, loaded.config.image.model, loaded.config.image.size, seed=seed)
+        for f in (f".cache/{h}.png", f".cache/{h}.json"):
+            (project_dir / f).unlink()
+        loaded.assets.pop(cid, None)
+    loaded.scenes[1].image_candidates = []
     loaded.scenes[1].image_asset_id = None
     loaded.scenes[1].status = "pending"
     loaded.pipeline["gen_assets"] = "running"
@@ -130,9 +142,10 @@ def test_killed_midway_image_resumes_remaining(store, project):
     ok, tts, image = _rerun(store, project)
     assert ok
     assert tts.synth_calls == 0                     # 配音全部缓存命中
-    assert image.api_calls == 1                     # 只补 s2 图
+    assert image.api_calls == 3                     # 只补 s2 的 3 张候选
     loaded = store.load("proj_resume")
-    assert loaded.scenes[1].image_asset_id == "img_s2"
+    assert loaded.scenes[1].image_asset_id == "img_s2_v1"
+    assert loaded.scenes[1].image_candidates == ["img_s2_v1", "img_s2_v2", "img_s2_v3"]
 
 
 def test_narration_change_invalidates_voice_cache(store, project):
@@ -140,9 +153,11 @@ def test_narration_change_invalidates_voice_cache(store, project):
     ok, tts, image = _rerun(store, project)
     assert ok
 
-    project.scenes[0].narration = "AI 正在彻底改变内容创作的方式。"   # 文案变了（_rerun 会连同 running 一起落盘）
+    loaded = store.load("proj_resume")                              # 改文案：读盘上最新状态再改
+    loaded.scenes[0].narration = "AI 正在彻底改变内容创作的方式。"
+    store.save(loaded, message="文案改动")                           # 候选资产/seed 原样保留
 
-    ok, tts, image = _rerun(store, project)
+    ok, tts, image = _rerun(store, loaded)
     assert ok
     assert tts.synth_calls == 1                     # 只重合成 s1（s2 缓存命中）
     assert image.api_calls == 0

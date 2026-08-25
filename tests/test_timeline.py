@@ -199,6 +199,43 @@ def test_build_missing_img_file(project_dir, monkeypatch) -> None:
         builder.build_timeline(project, proj)
 
 
+# ---------------------------------------------------------------- M6-7.5 候选图选中
+
+def test_build_uses_selected_candidate(project_dir, monkeypatch) -> None:
+    """选中候选进时间线：scene.image_asset_id 指向 v2 时 v2 生效（未选中的不引用）。"""
+    proj, project = project_dir
+    _patch_durations(monkeypatch, {"vo_s1.mp3": 2400, "vo_s2.mp3": 1800})
+    project.assets["img_s1_v2"] = Asset(type="image", path="assets/img_s1_v2.png", status="done")
+    _make_png(proj / "assets" / "img_s1_v2.png", rgb=(10, 200, 30))
+    project.scenes[0].image_asset_id = "img_s1_v2"
+
+    builder.build_timeline(project, proj)
+
+    assert project.timeline.video[0].asset_id == "img_s1_v2"
+    assert project.timeline.video[1].asset_id == "img_s2"       # 未改选的场景走原选中
+
+
+def test_build_missing_selection(project_dir, monkeypatch) -> None:
+    """候选未选（image_asset_id=None）→ FatalError 带修复提示，不静默回退。"""
+    proj, project = project_dir
+    _patch_durations(monkeypatch, {"vo_s1.mp3": 2400, "vo_s2.mp3": 1800})
+    project.scenes[0].image_asset_id = None
+
+    with pytest.raises(FatalError, match="未选择候选图"):
+        builder.build_timeline(project, proj)
+
+
+def test_build_selected_candidate_file_missing(project_dir, monkeypatch) -> None:
+    """选中的候选文件缺失 → 与旧单图同款「图文件缺失」报错（选中跟随文件校验）。"""
+    proj, project = project_dir
+    _patch_durations(monkeypatch, {"vo_s1.mp3": 2400, "vo_s2.mp3": 1800})
+    project.assets["img_s1_v2"] = Asset(type="image", path="assets/img_s1_v2.png", status="done")
+    project.scenes[0].image_asset_id = "img_s1_v2"
+
+    with pytest.raises(FatalError, match="图文件缺失"):
+        builder.build_timeline(project, proj)
+
+
 # ---------------------------------------------------------------- 编排
 
 def test_run_timeline_requires_gen_assets(store, tmp_path: Path) -> None:

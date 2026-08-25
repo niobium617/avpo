@@ -11,7 +11,8 @@ run_export：     export 节点 —— project → 剪映草稿目录（M2-3.2�
 
 产物命名约定（M2 时间线组装沿用）：
 - 配音段资产 id = vo_<scene_id>，路径 assets/vo_<scene_id>.mp3；
-- 图资产 id = img_<scene_id>，路径 assets/img_<scene_id>.png；
+- 图资产 id = img_<scene_id>_v1..vN（M6-7.5 候选图），路径同 id；
+  M6 前的旧式单图 img_<scene_id> 在重跑时清理（升级后首次重跑全量重生成）；
 - 字幕 scene_id 绑定到对应场景，时间戳与配音同源。
 
 两个函数都走 app/core/state.py 的 run_task：done 跳过、失败重试 ×3、状态与产物同一次提交。
@@ -22,6 +23,8 @@ M2-3.5 并发：配音+字幕阶段顺序执行（edge-tts 连续突发请求触
 """
 
 import asyncio
+import itertools
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -29,7 +32,7 @@ from app.core.progress import ProgressCallback, ProgressEvent
 from app.core.project import ProjectStore
 from app.core.schema import PIPELINE_NODES, Asset, Project, Scene
 from app.core.state import FatalError, run_task
-from app.core.styles import load_style
+from app.core.styles import StyleTemplate, compose_image_prompt, load_style
 from app.director.director import Director
 from app.export.jianying import export as export_draft
 from app.timeline.builder import build_timeline
@@ -102,7 +105,8 @@ def run_gen_assets(
     """gen_assets 节点：逐场景生成配音段 + 字幕 + 图，归档入 assets/。
 
     progress（M5）：结构化进度事件回调。percent 分段：配音+字幕占节点 45%
-    （顺序执行，n 场景均分），生图占 55%（并发，按完成张数均分），末事件恰好 1.0。
+    （顺序执行，n 场景均分），生图占 55%（并发，按完成候选张数均分，M6-7.5 候选级
+    粒度 = n 场景 × candidates 张），末事件恰好 1.0。
     生图段用 submit + as_completed，取结果后回调 —— 回调在 run_task 的调用线程发出
     （M5 后即 worker 线程，回调只写线程安全容器，绝不调 st.*）。
     """
@@ -120,17 +124,18 @@ def run_gen_assets(
                     "gen_assets", f"配音+字幕 {i + 1}/{len(p.scenes)}（{scene.scene_id}）",
                     0.45 * (i + 1) / len(p.scenes),
                 ))
-        # 阶段 2：并发生图（慢操作，4 张并行；缓存命中 0 API 调用）
+        # 阶段 2：并发生成候选图（M6-7.5：每场景 N 张；慢操作按场景并行，缓存命中 0 API 调用）
         if p.scenes:
+            total = len(p.scenes) * p.config.image.candidates
+            done = itertools.count(1)           # 候选级进度计数（GIL 下 next() 线程安全）
+            style = load_style(p.config.style)
             with ThreadPoolExecutor(max_workers=min(IMAGE_CONCURRENCY, len(p.scenes))) as pool:
-                futures = [pool.submit(_gen_scene_image, store, p, s, image) for s in p.scenes]
-                for done_n, fut in enumerate(as_completed(futures), 1):
+                futures = [
+                    pool.submit(_gen_scene_candidates, store, p, s, image, style, progress, done, total)
+                    for s in p.scenes
+                ]
+                for fut in as_completed(futures):
                     fut.result()                # 调用线程取结果：异常冒泡给 run_task 重试
-                    if progress:
-                        progress(ProgressEvent(
-                            "gen_assets", f"生图 {done_n}/{len(p.scenes)}",
-                            0.45 + 0.55 * done_n / len(p.scenes),
-                        ))
         _invalidate_downstream(p, "gen_assets")
 
     return run_task(store, project, "gen_assets", fn)
@@ -172,31 +177,77 @@ def _gen_scene_voice(
     project.subtitles.extend(build_subtitles(reattach_punctuation(words, scene.narration), scene.scene_id))
 
 
-def _gen_scene_image(
-    store: ProjectStore, project: Project, scene: Scene, image: ImageProvider
+def _gen_scene_candidates(
+    store: ProjectStore,
+    project: Project,
+    scene: Scene,
+    image: ImageProvider,
+    style: StyleTemplate,
+    progress: ProgressCallback | None,
+    done: itertools.count,
+    total: int,
 ) -> None:
-    """阶段 2：场景生图（缓存命中 0 API 调用）。多个场景并发执行，各写各的资产。"""
+    """阶段 2：场景候选图生成（M6-7.5，每场景 N 张候选，多场景并发各写各的资产）。
+
+    候选 id = img_<scene_id>_v1..vN，默认选中 v1（人审可改选，7.6 select_image_candidate）。
+    断点续跑：重跑复用已有候选的 seed（seed 进缓存键，同种子 0 次重复 API 调用）；
+    candidates 收敛后残留的旧 vN+ 资产/文件删除（孤儿清理），M6 前的旧式单图一并清理
+    （升级后首次重跑全量重生成，一次性成本见 README 迁移说明）。
+    提示词在生成时唯一拼装点 compose_image_prompt（确定性 = prompt_hash 缓存稳定）。
+    scene.cost["image"] = 各候选成本累计（3 候选 ≈ 成本×3）。
+    """
     config = project.config
     assets_dir = store.project_dir(project.project_id) / "assets"
+    n = config.image.candidates
+    base = f"img_{scene.scene_id}"
 
-    gen = image.generate(
-        scene.image_prompt,
-        assets_dir / f"img_{scene.scene_id}.png",
-        model=config.image.model,
-        size=config.image.size,
-    )
-    img_id = f"img_{scene.scene_id}"
-    project.assets[img_id] = Asset(
-        type="image",
-        path=f"assets/img_{scene.scene_id}.png",
-        model=config.image.model,
-        prompt_hash=prompt_hash(scene.image_prompt, config.image.model, config.image.size),
-        seed=gen.seed,
-        cost=gen.cost,
-        status="done",
-    )
-    scene.image_asset_id = img_id
-    scene.cost["image"] = gen.cost
+    # 已有候选的 seed 复用（断点续跑 0 重复调用；无则新抽，候选互不串缓存键）
+    existing: dict[int, int] = {}
+    for cid in list(scene.image_candidates):
+        asset = project.assets.get(cid)
+        if asset and asset.seed is not None and cid.startswith(f"{base}_v"):
+            try:
+                existing[int(cid.rsplit("_v", 1)[1])] = asset.seed
+            except ValueError:
+                pass
+
+    # 孤儿清理：candidates 收敛后的旧 vN+ 与 M6 前旧式单图 img_<scene_id>
+    keep = {f"{base}_v{i}" for i in range(1, n + 1)}
+    for cid in list(project.assets):
+        if cid == base or (cid.startswith(f"{base}_v") and cid not in keep):
+            project.assets.pop(cid, None)
+            (assets_dir / f"{cid}.png").unlink(missing_ok=True)
+
+    prompt = compose_image_prompt(style, project.brief, scene)
+    candidates: list[str] = []
+    cost = 0.0
+    for i in range(1, n + 1):
+        cid = f"{base}_v{i}"
+        gen = image.generate(
+            prompt,
+            assets_dir / f"{cid}.png",
+            model=config.image.model,
+            size=config.image.size,
+            seed=existing[i] if i in existing else random.randint(0, 10**9),
+        )
+        project.assets[cid] = Asset(
+            type="image",
+            path=f"assets/{cid}.png",
+            model=config.image.model,
+            prompt_hash=prompt_hash(prompt, config.image.model, config.image.size, seed=gen.seed),
+            seed=gen.seed,
+            cost=gen.cost,
+            status="done",
+        )
+        candidates.append(cid)
+        cost += gen.cost
+        if progress:
+            k = next(done)
+            progress(ProgressEvent("gen_assets", f"生图 {k}/{total}", 0.45 + 0.55 * k / total))
+
+    scene.image_candidates = candidates
+    scene.image_asset_id = scene.image_asset_id if scene.image_asset_id in keep else f"{base}_v1"
+    scene.cost["image"] = cost
     scene.status = "done"
 
 

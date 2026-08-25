@@ -8,7 +8,7 @@ from pathlib import Path
 
 from app.core.pipeline import run_gen_assets
 from app.core.project import ProjectStore
-from app.core.schema import Project, Scene
+from app.core.schema import ImageConfig, Project, ProjectConfig, Scene
 from app.tts.base import TTSResult, TTSWord
 from app.vision.base import GeneratedImage
 
@@ -31,7 +31,9 @@ class _SlowImage:
     def __init__(self):
         self.cache = None
 
-    def generate(self, prompt: str, out_png: Path, model: str, size: str = "16:9") -> GeneratedImage:
+    def generate(
+        self, prompt: str, out_png: Path, model: str, size: str = "16:9", seed: int | None = None
+    ) -> GeneratedImage:
         time.sleep(_IMAGE_SLEEP_S)
         out_png = Path(out_png)
         out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -47,6 +49,7 @@ def test_gen_assets_images_run_in_parallel(tmp_path: Path, monkeypatch) -> None:
 
     project = Project(
         project_id="proj_conc",
+        config=ProjectConfig(image=ImageConfig(candidates=1)),   # 钉 1 候选：只验并发几何（R6）
         scenes=[
             Scene(
                 scene_id=f"s{i}", narration=f"第{i}句。",

@@ -114,11 +114,11 @@ def test_run_gen_assets_progress_callback(store):
         ("gen_assets", "配音+字幕 1/2（s1）", pytest.approx(0.225)),
         ("gen_assets", "配音+字幕 2/2（s2）", pytest.approx(0.45)),
     ]
-    # 生图段 2 张并发完成，顺序不定：按消息排序后逐项断 percent
+    # 生图段候选级粒度：2 场景 × 3 候选 = 6 张，并发完成顺序不定：按消息排序后逐项断 percent
     image_events = sorted(events[2:], key=lambda e: e.message)
-    assert [e.message for e in image_events] == ["生图 1/2", "生图 2/2"]
-    assert image_events[0].percent == pytest.approx(0.725)
-    assert image_events[1].percent == pytest.approx(1.0)
+    assert [e.message for e in image_events] == [f"生图 {k}/6" for k in range(1, 7)]
+    assert image_events[0].percent == pytest.approx(0.45 + 0.55 / 6)
+    assert image_events[-1].percent == pytest.approx(1.0)
 
 
 def test_run_gen_assets_percent_monotonic_and_bounded(store):
@@ -136,7 +136,7 @@ def test_run_gen_assets_percent_monotonic_and_bounded(store):
     voice = [e.percent for e in events if e.node == "gen_assets" and e.message.startswith("配音")]
     image = [e.percent for e in events if e.node == "gen_assets" and e.message.startswith("生图")]
     assert voice == sorted(voice) and len(set(voice)) == 3     # 严格递增
-    assert image == sorted(image) and len(set(image)) == 3
+    assert image == sorted(image) and len(set(image)) == 9     # 3 场景 × 3 候选 = 9 张
     assert max(voice) < min(image)                             # 两阶段不重叠
     assert voice[-1] == pytest.approx(0.45)
     assert image[-1] == pytest.approx(1.0)

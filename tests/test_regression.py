@@ -98,8 +98,8 @@ def test_style_full_chain_exports(store, style, i):
 
     # 模板接线：motion_hint 注入 director
     assert director.hints[-1] == load_style(style).motion_hint
-    # 素材产物：3 配音 + 3 图
-    assert tts.calls == 3 and image.calls == 3
+    # 素材产物：3 配音 + 3 场景 × 3 候选图（M6-7.5）
+    assert tts.calls == 3 and image.calls == 9
 
     draft = _draft_dir(store, pid)
     assert (draft / "draft_content.json").is_file()

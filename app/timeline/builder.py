@@ -1,9 +1,11 @@
 """时间线组装（IMPLEMENTATION_PLAN 3.1）。
 
-把 M1 产出的逐场景素材（vo_<scene_id>.mp3 + img_<scene_id>.png）组装成全局时间轴：
+把 M1 产出的逐场景素材（vo_<scene_id>.mp3 + 候选图中人审选中的一张）组装成全局时间轴：
 - scene 时长 = 对应配音段的实际时长（mutagen 读 mp3），场景依次首尾相接、无缝隙；
-- 每个场景：视频轨 img clip（start=累计起点，duration=配音时长，运镜取 director 已分配的
-  scene.motion）+ 音频轨 vo clip（offset=累计起点，duration_ms=配音时长）；
+- 每个场景：视频轨 img clip（asset_id = scene.image_asset_id —— M6-7.5 起为
+  候选图 img_<scene_id>_vN 中选中的那张，start=累计起点，duration=配音时长，
+  运镜取 director 已分配的 scene.motion）+ 音频轨 vo clip（offset=累计起点，
+  duration_ms=配音时长）；
 - scene.start_ms 记录全局起点 —— 字幕仍保持场景内相对时间戳（M1 产物），导出时按
   scene.start_ms 平移（app/export/jianying.py），单一真相源不破坏幂等；
 - voiceover 顶层字段填汇总：duration_ms=总时长、status=done（整片 = 各段拼接）。
@@ -35,7 +37,12 @@ def build_timeline(project: Project, project_root: Path) -> None:
 
     for scene in project.scenes:
         vo_id = f"vo_{scene.scene_id}"
-        img_id = f"img_{scene.scene_id}"
+        img_id = scene.image_asset_id
+        if img_id is None:
+            raise FatalError(
+                f"scene {scene.scene_id} 未选择候选图",
+                hint="先跑 avpo gen-assets 生成候选素材",
+            )
 
         vo_asset = project.assets.get(vo_id)
         if vo_asset is None:

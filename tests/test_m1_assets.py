@@ -154,7 +154,7 @@ def chain_project(store) -> Project:
 
 
 def test_full_chain_mocked(store, chain_project, monkeypatch):
-    director, chat, image, images = _make_fakes(monkeypatch, n_images=2)
+    director, chat, image, images = _make_fakes(monkeypatch, n_images=6)
     tts = FakeTTS()
 
     # direct：文案 → 分镜
@@ -163,60 +163,62 @@ def test_full_chain_mocked(store, chain_project, monkeypatch):
     assert len(chain_project.scenes) == 2
     assert len(chat.calls) == 1
 
-    # gen_assets：配音 + 字幕 + 3 图 → 归档
+    # gen_assets：配音 + 字幕 + 每场景 3 候选图 → 归档
     assert run_gen_assets(store, chain_project, tts, image) is True
     assert chain_project.pipeline["gen_assets"] == "done"
 
     # ---- 落盘后重新加载，断言 JSON 完整（退出条件）----
     loaded = store.load("proj_chain")
-    assert set(loaded.assets) == {"vo_s1", "vo_s2", "img_s1", "img_s2"}
+    img_ids = {f"img_{sid}_v{i}" for sid in ("s1", "s2") for i in range(1, 4)}
+    assert set(loaded.assets) == {"vo_s1", "vo_s2"} | img_ids
     assert all(a.status == "done" for a in loaded.assets.values())
     for a in loaded.assets.values():                    # 产物真实存在
         assert (store.project_dir("proj_chain") / a.path).is_file()
 
-    # 场景完成、图资产关联、成本记录
+    # 场景完成、默认选中 v1、候选清单齐备、成本累计（3 候选 ≈ 单价×3）
     for s in loaded.scenes:
         assert s.status == "done"
-        assert s.image_asset_id == f"img_{s.scene_id}"
-        assert s.cost["image"] == COST_PER_IMAGE
+        assert s.image_asset_id == f"img_{s.scene_id}_v1"
+        assert s.image_candidates == [f"img_{s.scene_id}_v{i}" for i in range(1, 4)]
+        assert s.cost["image"] == pytest.approx(3 * COST_PER_IMAGE)
         assert s.cost["llm"] > 0
-    assert loaded.assets["img_s1"].seed is not None
-    assert loaded.assets["img_s1"].prompt_hash
+    assert loaded.assets["img_s1_v1"].seed is not None
+    assert loaded.assets["img_s1_v1"].prompt_hash
 
     # 字幕覆盖全文（与配音同源）
     assert norm("".join(sub.text for sub in loaded.subtitles)) == norm(TEXT)
     assert all(sub.scene_id in {"s1", "s2"} for sub in loaded.subtitles)
 
-    # 配音 mp3 每场景一条、TTS 被调两次
+    # 配音 mp3 每场景一条、TTS 被调两次、生图 6 张候选
     assert tts.calls == ["AI 正在改变内容创作的方式。", "现在，一个人也能做视频。"]
-    assert len(images.calls) == 2
+    assert len(images.calls) == 6
 
 
 def test_gen_assets_rerun_hits_image_cache(store, chain_project, monkeypatch):
-    """二次生成 0 次生图 API 调用（2.5 验收在链路层复验）。"""
-    director, _, image, images = _make_fakes(monkeypatch, n_images=2)
+    """二次生成 0 次生图 API 调用（2.5 验收在链路层复验；M6-7.5 候选断点续跑）。"""
+    director, _, image, images = _make_fakes(monkeypatch, n_images=6)
     tts = FakeTTS()
 
     run_direct(store, chain_project, director, TEXT)
     assert run_gen_assets(store, chain_project, tts, image) is True
-    assert len(images.calls) == 2
+    assert len(images.calls) == 6
 
     # 状态机 done 跳过 —— 重跑直接返回，不调任何 API
     assert run_gen_assets(store, chain_project, tts, image) is True
-    assert len(images.calls) == 2
+    assert len(images.calls) == 6
     assert len(tts.calls) == 2
 
-    # 即使把节点重置为 pending 重跑，生图仍命中缓存（0 新 API 调用）
+    # 即使把节点重置为 pending 重跑，候选 seed 复用 → 生图仍命中缓存（0 新 API 调用）
     chain_project.pipeline["gen_assets"] = "pending"
     store.save(chain_project)
     assert run_gen_assets(store, chain_project, tts, image) is True
-    assert len(images.calls) == 2                        # 未新增生图调用
+    assert len(images.calls) == 6                        # 未新增生图调用
     assert len(tts.calls) == 2                           # M3-4.1: TTS sidecar 缓存命中，也未新增合成
 
 
 def test_chain_survives_retry_no_duplicate_subtitles(store, chain_project, monkeypatch):
     """fn 可重入：第一次跑到一半抛 TransientError，重试后字幕不叠加。"""
-    director, _, image, images = _make_fakes(monkeypatch, n_images=2)
+    director, _, image, images = _make_fakes(monkeypatch, n_images=6)
     tts = FakeTTS()
 
     calls = {"n": 0}
@@ -279,7 +281,9 @@ def test_real_full_chain(tmp_path: Path):
     loaded = store.load("proj_live")
     assert loaded.pipeline["direct"] == "done"
     assert loaded.pipeline["gen_assets"] == "done"
-    assert set(loaded.assets) == {"vo_s1", "vo_s2", "img_s1", "img_s2"}
+    # M6-7.5：每场景 3 候选（真实渠道按配置 candidates）
+    img_ids = {f"img_{sid}_v{i}" for sid in ("s1", "s2") for i in range(1, 4)}
+    assert set(loaded.assets) == {"vo_s1", "vo_s2"} | img_ids
     assert all((store.project_dir("proj_live") / a.path).is_file() for a in loaded.assets.values())
     # 字幕覆盖全文
     assert norm("".join(s.text for s in loaded.subtitles)) == norm(TEXT)

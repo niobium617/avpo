@@ -51,12 +51,14 @@ class _FakeDirector:
 
 
 class _FakeImage:
-    """确定性生图：PNG 内容由 prompt 的 sha256 决定，seed 固定 42。"""
+    """确定性生图：PNG 内容由 prompt 的 sha256 决定，seed 固定 42（候选种子不影响输出）。"""
 
     def __init__(self, cache=None):
         self.cache = cache
 
-    def generate(self, prompt: str, out_png: Path, model: str, size: str = "16:9") -> GeneratedImage:
+    def generate(
+        self, prompt: str, out_png: Path, model: str, size: str = "16:9", seed: int | None = None
+    ) -> GeneratedImage:
         h = hashlib.sha256(prompt.encode()).digest()
         png = _png_from_bytes(h[:3])
         out_png = Path(out_png)
@@ -134,7 +136,7 @@ def test_e2e_full_chain_deterministic(tmp_path: Path, monkeypatch) -> None:
     # 全链路节点 done + 产物齐备
     assert all(v == "done" for v in dump_a["pipeline"].values())
     assert len(dump_a["scenes"]) == 2
-    assert len(dump_a["assets"]) == 4            # 2 图 + 2 配音
+    assert len(dump_a["assets"]) == 8            # 2 场景 × 3 候选图 + 2 配音（M6-7.5）
     assert len(dump_a["subtitles"]) == 2
     assert len(dump_a["timeline"]["video"]) == 2
 
