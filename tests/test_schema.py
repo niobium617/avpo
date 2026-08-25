@@ -59,3 +59,83 @@ def test_status_assignment_validated(sample_project: Project) -> None:
     """validate_assignment：赋值时也走校验，非法状态当场报错。"""
     with pytest.raises(ValidationError):
         sample_project.scenes[0].status = "finished"  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------- M6-7.1 schema 0.2
+
+def test_new_project_schema_version_020() -> None:
+    """M6：新项目 schema_version = 0.2，pipeline 节点不变。"""
+    project = Project(project_id="proj_m6")
+    assert project.schema_version == "0.2"
+    assert list(project.pipeline) == ["direct", "confirm", "gen_assets", "timeline", "export"]
+
+
+def test_legacy_json_loads_with_new_defaults() -> None:
+    """旧 JSON（schema 0.1，无 M6 键）加载：新字段全部落到默认值。"""
+    data = {
+        "project_id": "legacy",
+        "schema_version": "0.1",
+        "pipeline": {n: "pending" for n in ("direct", "confirm", "gen_assets", "timeline", "export")},
+        "scenes": [{"scene_id": "s1", "narration": "hi", "motion": "none"}],
+    }
+    project = Project.model_validate(data)
+    assert project.brief is None
+    assert project.reference_images == []
+    s = project.scenes[0]
+    assert s.shot_size == ""
+    assert s.sfx == ""
+    assert s.planned_duration_ms is None
+    assert s.image_candidates == []
+    assert s.end_image_asset_id is None
+    assert s.image_asset_id is None
+
+
+def test_brief_roundtrip() -> None:
+    """Brief 全字段 dump/validate 无损（含风格关键词包与 BGM 节奏）。"""
+    project = Project(
+        project_id="p",
+        brief={
+            "theme": "末日求生", "art_style": "实写末日", "platform": "抖音",
+            "palette": "冷灰 + 橙色火光", "lighting": "volumetric lighting from upper left",
+            "character": "络腮胡中年男", "bgm_hint": "重拍在第 3、8 秒",
+        },
+    )
+    dumped = project.model_dump(mode="json")
+    reloaded = Project.model_validate(dumped)
+    assert reloaded.brief == project.brief  # type: ignore[union-attr]
+
+
+def test_candidate_asset_missing_rejected(sample_project: Project) -> None:
+    """候选图引用不存在的 asset → 拒绝。"""
+    data = sample_project.model_dump(mode="json")
+    data["scenes"][0]["image_candidates"] = ["img_ghost"]
+    with pytest.raises(ValidationError, match="候选图引用了不存在的 asset_id"):
+        Project.model_validate(data)
+
+
+def test_end_image_asset_ghost_rejected(sample_project: Project) -> None:
+    """首尾帧引用不存在的 asset → 拒绝（M7 预埋字段的校验先行）。"""
+    data = sample_project.model_dump(mode="json")
+    data["scenes"][0]["end_image_asset_id"] = "img_ghost"
+    with pytest.raises(ValidationError, match="首尾帧引用了不存在的 asset_id"):
+        Project.model_validate(data)
+
+
+def test_reference_images_duplicate_id_rejected(sample_project: Project) -> None:
+    data = sample_project.model_dump(mode="json")
+    data["reference_images"] = [
+        {"id": "ref1", "path": "assets/ref_1.png"},
+        {"id": "ref1", "path": "assets/ref_2.png"},
+    ]
+    with pytest.raises(ValidationError, match="reference_images id 重复"):
+        Project.model_validate(data)
+
+
+def test_candidates_bounds_enforced() -> None:
+    """ImageConfig.candidates 范围 1~6。"""
+    with pytest.raises(ValidationError):
+        from app.core.schema import ProjectConfig
+        ProjectConfig(image={"candidates": 0})
+    ProjectConfig(image={"candidates": 6})  # 边界合法
+    with pytest.raises(ValidationError):
+        ProjectConfig(image={"candidates": 7})

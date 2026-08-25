@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 TaskStatus = Literal["pending", "running", "done", "failed"]
 MotionKind = Literal["zoom_in_slow", "zoom_out", "pan_left", "pan_right", "none"]
 AssetKind = Literal["image", "audio", "video"]
+# 景别（M6 阶段一：分镜脚本标注）
+ShotSize = Literal["远景", "全景", "中景", "近景", "特写", "空镜", ""]
 # LLM/生图渠道：siliconflow（FLUX + DeepSeek-V3）或 dashscope（通义万相 + qwen）
 ProviderKind = Literal["siliconflow", "dashscope"]
 
@@ -39,6 +41,8 @@ class ImageConfig(StrictModel):
     provider: ProviderKind = "siliconflow"
     model: str = "black-forest-labs/FLUX.1-schnell"   # dashscope 渠道用 wanx2.1-t2i-turbo
     size: str = "16:9"
+    # M6-7.1：每镜候选图张数（阶段二「3~5 版候选筛选」）；JSON 可改，UI 暂不暴露
+    candidates: int = Field(default=3, ge=1, le=6)
 
 
 class LLMConfig(StrictModel):
@@ -57,15 +61,61 @@ class ProjectConfig(StrictModel):
 
 # ---------------------------------------------------------------- 内容
 
+class Brief(StrictModel):
+    """阶段一「前期策划」创作简报：主题/世界观/画风 + 风格关键词包。
+
+    M6 定位：AI 是协作者 —— brief 由创作者填写，作为分镜与生图的「不变量」输入。
+    palette/lighting/character 即「风格关键词包」结构化字段（主色调/光影/人物特征），
+    生图拼装时注入（见 app/core/styles.py compose_image_prompt）。
+    bgm_hint 为 BGM 节奏/卡点描述（情绪锚点前置，M8 卡点剪辑的输入）。
+    """
+
+    theme: str = ""             # 主题
+    worldview: str = ""         # 世界观
+    art_style: str = ""         # 整体画风（如实写末日 / 漫画风）
+    duration: str = ""          # 时长（如 "60s"）
+    platform: str = ""          # 发布平台
+    protagonist: str = ""       # 主角形象
+    plot: str = ""              # 核心剧情
+    emotion: str = ""           # 情绪基调
+    palette: str = ""           # 主色调（风格关键词包）
+    lighting: str = ""          # 光影指令（如 "volumetric lighting from upper left"）
+    character: str = ""         # 人物核心特征（风格关键词包）
+    bgm_hint: str = ""          # BGM 节奏/卡点描述（重拍/高潮/骤停）
+
+
+class ReferenceImage(StrictModel):
+    """参考图（多角度图组：正面/侧面/45° 仰视，按 angle/role 标签区分）。
+
+    支持图生图的渠道作为固定 ControlNet 式输入注入生图（M6-7.4）；不支持的渠道
+    降级为「仅风格关键词包」模式（见 ImageProvider.supports_reference_image）。
+    """
+
+    id: str
+    path: str                   # 相对项目目录，如 assets/ref_1.png
+    angle: str = ""             # 拍摄角度标签（正面/侧面/45°仰视…）
+    role: str = ""              # 用途/角色标签（主角/场景/道具…）
+
+
 class Scene(StrictModel):
-    """一个分镜：一段口播文案 + 一张图 + 一个运镜。"""
+    """一个分镜：一段口播文案 + 一张图（候选多张）+ 一个运镜。
+
+    M6 扩展（阶段一/二）：shot_size 景别、planned_duration_ms 规划时长（对齐 BGM
+    节奏）、sfx 音效描述、image_candidates 候选图资产 id 列表（人审选中的
+    image_asset_id 供时间线使用）、end_image_asset_id 为 M7「首尾帧」预埋字段。
+    """
 
     scene_id: str
     narration: str = ""
     visual: str = ""            # 画面描述（中文，人看）
-    image_prompt: str = ""      # 生图提示词（英文，喂 FLUX）
-    image_asset_id: str | None = None
+    image_prompt: str = ""      # 生图提示词（英文，可变「主体+动作+场景」模块）
+    image_asset_id: str | None = None   # 人审选中的候选图（时间线用）
+    image_candidates: list[str] = Field(default_factory=list)   # 候选图资产 id（gen_assets 写入）
+    end_image_asset_id: str | None = None   # M7 首尾帧：镜头结束帧（阶段三动态化输入）
     motion: MotionKind = "none"
+    shot_size: ShotSize = ""    # 景别
+    planned_duration_ms: int | None = None   # 规划时长（预估；时间线以配音实测为准）
+    sfx: str = ""               # 音效描述（阶段四；素材自备 assets/sfx/）
     start_ms: int = 0           # 时间线全局起点（app/timeline/builder.py 组装时写入）
     status: TaskStatus = "pending"
     cost: dict[str, float] = Field(default_factory=dict)   # 如 {"image": 0.02, "llm": 0.001}
@@ -112,6 +162,7 @@ class Asset(StrictModel):
     model: str | None = None
     prompt_hash: str | None = None
     seed: int | None = None
+    reference_asset_id: str | None = None   # M6-7.6 图生图精修：生成时使用的参考图资产 id
     cost: float = 0.0
     status: TaskStatus = "pending"
 
@@ -141,8 +192,10 @@ class PipelineError(StrictModel):
 class Project(StrictModel):
     project_id: str
     title: str = ""
-    schema_version: str = "0.1"
+    schema_version: str = "0.2"   # M6-7.1：0.1 → 0.2（增量字段，旧 JSON 直接加载，load 时内存升版）
     config: ProjectConfig = Field(default_factory=ProjectConfig)
+    brief: Brief | None = None    # M6-7.1 阶段一策划简报（None = 旧项目/未策划）
+    reference_images: list[ReferenceImage] = Field(default_factory=list)   # M6-7.1 参考图组
     pipeline: dict[str, TaskStatus] = Field(
         default_factory=lambda: {node: "pending" for node in PIPELINE_NODES}
     )
@@ -182,11 +235,26 @@ class Project(StrictModel):
             if clip.asset_id not in asset_ids:
                 raise ValueError(f"时间线音频轨引用了不存在的 asset_id: {clip.asset_id}")
 
-        # 配音 / 场景图引用存在的 asset
+        # 配音 / 场景图 / 候选图 / 首尾帧引用存在的 asset
         if self.voiceover.asset_id and self.voiceover.asset_id not in asset_ids:
             raise ValueError(f"voiceover 引用了不存在的 asset_id: {self.voiceover.asset_id}")
         for scene in self.scenes:
             if scene.image_asset_id and scene.image_asset_id not in asset_ids:
                 raise ValueError(f"scene {scene.scene_id} 引用了不存在的 asset_id: {scene.image_asset_id}")
+            for cid in scene.image_candidates:
+                if cid not in asset_ids:
+                    raise ValueError(
+                        f"scene {scene.scene_id} 的候选图引用了不存在的 asset_id: {cid}"
+                    )
+            if scene.end_image_asset_id and scene.end_image_asset_id not in asset_ids:
+                raise ValueError(
+                    f"scene {scene.scene_id} 的首尾帧引用了不存在的 asset_id: {scene.end_image_asset_id}"
+                )
+
+        # 参考图 id 唯一
+        ref_ids = [r.id for r in self.reference_images]
+        if len(ref_ids) != len(set(ref_ids)):
+            dup = sorted({i for i in ref_ids if ref_ids.count(i) > 1})
+            raise ValueError(f"reference_images id 重复: {dup}")
 
         return self

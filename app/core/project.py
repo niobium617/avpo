@@ -101,11 +101,18 @@ class ProjectStore:
         return project
 
     def load(self, project_id: str) -> Project:
-        """读取并校验 project.json；不存在/损坏都会报错，不做静默兜底。"""
+        """读取并校验 project.json；不存在/损坏都会报错，不做静默兜底。
+
+        M6-7.1 升版 shim：schema 0.1 → 0.2 为纯增量字段（默认值即可加载），
+        读取后仅把版本号在内存中升到 0.2，下次 save 时持久化 —— 文件内容不迁移。
+        """
         path = self.json_path(project_id)
         if not path.is_file():
             raise FileNotFoundError(f"项目不存在: {project_id}（{path}）")
-        return Project.model_validate_json(path.read_text(encoding="utf-8"))
+        project = Project.model_validate_json(path.read_text(encoding="utf-8"))
+        if project.schema_version == "0.1":
+            project.schema_version = "0.2"
+        return project
 
     def list_project_ids(self) -> list[str]:
         """枚举项目 id：projects/ 下含 project.json 的目录名，按名排序。
