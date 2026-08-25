@@ -80,21 +80,6 @@ def run_direct(
     return run_task(store, project, "direct", fn)
 
 
-def update_scenes(store: ProjectStore, project: Project, scenes: list[Scene]) -> Project:
-    """分镜人工修改落盘：只允许改 visual / image_prompt / motion。
-
-    narration 是「拼接=原文」的逐字校验不变量，改动即拒绝（改文案请重新跑 direct）。
-    落盘后 direct 下游全部重置 pending —— 生图提示词/运镜变了，素材/时间线/导出
-    必须重跑；配音文案未变时 TTS sidecar 缓存命中，重跑成本可忽略。
-    """
-    if [s.narration for s in scenes] != [s.narration for s in project.scenes]:
-        raise ValueError("narration 不可修改（分镜文案逐字不变量）；改文案请重新运行 direct")
-    project.scenes = scenes
-    _invalidate_downstream(project, "direct")
-    store.save(project, message=f"{project.project_id}: 分镜人工修改")
-    return project
-
-
 def run_gen_assets(
     store: ProjectStore,
     project: Project,

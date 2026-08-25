@@ -18,7 +18,7 @@
 
 import streamlit as st
 
-from app.core import env, errors, pipeline, providers, styles
+from app.core import edits, env, errors, pipeline, providers, styles
 from app.web import tasks
 from app.core.cost import DEFAULT_BUDGET, summarize
 from app.core.project import ProjectStore
@@ -280,7 +280,7 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
 
     if st.button("保存全部修改", key=f"save_scenes_{pid}", disabled=not edited or busy):
         try:
-            pipeline.update_scenes(store, project, new_scenes)
+            edits.update_scenes(store, project, new_scenes)
         except ValueError as exc:
             st.error(str(exc))
         else:

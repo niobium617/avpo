@@ -196,6 +196,7 @@ class Project(StrictModel):
     config: ProjectConfig = Field(default_factory=ProjectConfig)
     brief: Brief | None = None    # M6-7.1 阶段一策划简报（None = 旧项目/未策划）
     reference_images: list[ReferenceImage] = Field(default_factory=list)   # M6-7.1 参考图组
+    reference_seq: int = 0    # M6-7.6 参考图 id 计数器：ref_<n> 单调递增，删除不复用
     pipeline: dict[str, TaskStatus] = Field(
         default_factory=lambda: {node: "pending" for node in PIPELINE_NODES}
     )

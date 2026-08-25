@@ -1,8 +1,12 @@
-"""M4-5.1 验收：update_scenes 分镜修改落盘 + run_direct/run_gen_assets 进度回调。"""
+"""M4-5.1 验收：update_scenes 分镜修改落盘 + run_direct/run_gen_assets 进度回调。
+
+M6-7.6：update_scenes 收敛到 app/core/edits.py（文案守卫放宽为可改）。
+"""
 
 import pytest
 
-from app.core.pipeline import run_direct, run_gen_assets, update_scenes
+from app.core.edits import update_scenes
+from app.core.pipeline import run_direct, run_gen_assets
 from app.core.progress import ProgressEvent
 from app.core.schema import PIPELINE_NODES, Project, Scene
 from app.tts.base import TTSResult, TTSWord
@@ -69,12 +73,15 @@ def test_update_scenes_invalidates_downstream(store, sample_project):
         assert loaded.pipeline[node] == "pending"   # 下游全部重跑
 
 
-def test_update_scenes_rejects_narration_change(store, sample_project):
+def test_update_scenes_allows_narration_change(store, sample_project):
+    """M6-7.6 文案守卫放宽：文案可改（TTS sidecar 按 narration_hash 自动失效重合成）。"""
     store.create(sample_project)
     scenes = [s.model_copy(deep=True) for s in sample_project.scenes]
     scenes[0].narration = "改了文案。"
-    with pytest.raises(ValueError, match="narration"):
-        update_scenes(store, sample_project, scenes)
+
+    update_scenes(store, sample_project, scenes)
+
+    assert store.load("proj_001").scenes[0].narration == "改了文案。"
 
 
 def test_update_scenes_rejects_duplicate_scene_id(store, sample_project):
