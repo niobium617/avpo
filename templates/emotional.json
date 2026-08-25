@@ -3,6 +3,10 @@
   "name": "情感向",
   "description": "故事/情感类：慢运镜 + 轻 BGM，字幕温和不抢画面",
   "motion_hint": "运镜要慢、稳、有呼吸感：以 zoom_in_slow 与 none 为主，少用平移，避免快切",
+  "prompt_prefix": "soft watercolor painting, warm tones, gentle edges",
+  "prompt_lighting": "soft golden hour lighting, gentle rim light",
+  "quality_suffix": "delicate texture, film grain, high detail",
+  "shot_size_hint": "情感叙事以中景/近景为主，特写留给情绪转折点",
   "subtitle_style": {
     "size": 5.0,
     "y": -0.75,

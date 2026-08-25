@@ -17,7 +17,7 @@ from pathlib import Path
 
 from pydantic import Field
 
-from app.core.schema import StrictModel
+from app.core.schema import Brief, Scene, StrictModel
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"   # app/core/styles.py → 项目根/templates
 
@@ -33,6 +33,11 @@ class StyleTemplate(StrictModel):
     name: str
     description: str = ""
     motion_hint: str = ""                       # 注入 director 系统提示词的运镜指导
+    # M6-7.2 提示词模块（阶段二「提示词模块化」：固定「画风+光影+画质」模块）：
+    prompt_prefix: str = ""                     # 画风模块（英文，如 "flat illustration, bold shapes"）
+    prompt_lighting: str = ""                   # 光影模块（独立字段 —— 光影逻辑是画风一致的关键败点）
+    quality_suffix: str = ""                    # 画质模块（英文，如 "ultra detailed, sharp focus"）
+    shot_size_hint: str = ""                    # 景别指导（中文，注入 director 系统提示词）
     subtitle_style: SubtitleStyle = Field(default_factory=SubtitleStyle)
     bgm: str | None = None                      # 相对项目目录；文件缺失降级跳过
 
@@ -58,3 +63,25 @@ def load_style(style_id: str) -> StyleTemplate:
 def list_styles() -> list[str]:
     """可用模板 id（default 优先展示，其后按文件名排序）。"""
     return ["default"] + sorted(p.stem for p in TEMPLATES_DIR.glob("*.json"))
+
+
+def compose_image_prompt(style: StyleTemplate, brief: Brief | None, scene: Scene) -> str:
+    """拼装最终生图提示词（M6-7.2，生成时唯一拼装点）。
+
+    提示词模块化：固定「画风 + 光影 + 画质」模块只换不写，变量部分是创作者可编辑的
+    scene.image_prompt（「主体 + 动作 + 场景」）。顺序：
+        style.prompt_prefix → 光影(brief.lighting 覆盖 style.prompt_lighting)
+        → brief.palette（主色调）→ brief.character（人物特征）
+        → scene.image_prompt → style.quality_suffix
+    非空模块以 ", " 连接 —— 确定性拼装（同输入同输出）是 prompt_hash 缓存稳定的前提。
+    """
+    brief = brief or Brief()          # None（旧项目）按空 Brief 拼装，退化为纯模板+场景模块
+    parts = [
+        style.prompt_prefix,
+        brief.lighting.strip() or style.prompt_lighting,
+        brief.palette,
+        brief.character,
+        scene.image_prompt,
+        style.quality_suffix,
+    ]
+    return ", ".join(p for p in parts if p.strip())

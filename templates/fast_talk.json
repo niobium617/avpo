@@ -3,6 +3,10 @@
   "name": "快节奏口播",
   "description": "带货/资讯类口播：运镜频繁切换制造节奏感，字幕醒目低位",
   "motion_hint": "运镜要频繁切换、节奏快：zoom_in_slow / pan_left / zoom_out / pan_right 轮换使用，避免相邻场景用同一运镜",
+  "prompt_prefix": "flat illustration, bold shapes, high contrast colors",
+  "prompt_lighting": "cinematic lighting, volumetric light from upper left, global illumination",
+  "quality_suffix": "ultra detailed, sharp focus, high resolution",
+  "shot_size_hint": "快节奏口播多用近景/特写突出信息，少量全景交代环境",
   "subtitle_style": {
     "size": 6.0,
     "y": -0.8,

@@ -3,6 +3,10 @@
   "name": "解说向",
   "description": "知识/解说类：字幕大字号偏上居中，重点句强调感，无 BGM",
   "motion_hint": "运镜克制：以 zoom_in_slow 为主配合少量 pan_left，静止场景用 none，画面稳定突出讲解",
+  "prompt_prefix": "clean flat design, minimal composition, informative",
+  "prompt_lighting": "even studio lighting, no harsh shadows",
+  "quality_suffix": "crisp vector-like details, high clarity",
+  "shot_size_hint": "解说以中景/近景为主，特写用于强调关键概念",
   "subtitle_style": {
     "size": 7.0,
     "y": -0.55,
