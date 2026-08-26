@@ -21,7 +21,7 @@ from app.core import edits
 from app.core.progress import ProgressEvent
 from app.core.project import ProjectStore
 from app.core.providers import ImageCapabilities
-from app.core.schema import PipelineError, Project, Scene
+from app.core.schema import Asset, PipelineError, Project, Scene
 
 APP = Path(__file__).resolve().parents[1] / "app" / "web" / "app.py"
 
@@ -513,6 +513,214 @@ def test_confirm_button_marks_done(at: AppTest) -> None:
 
     assert not at.exception
     assert _store().load("proj_ui").pipeline["confirm"] == "done"
+
+
+# ---------------------------------------------------------------- 分镜编辑器改版（M6-7.8）
+
+def _mk_candidate_project(pid: str = "proj_ui") -> ProjectStore:
+    """带 3 张候选图资产（真实 PNG 文件，st.image 需 PIL 可解码）的项目。"""
+    store = _store()
+    store.init_repo()
+    project = Project(project_id=pid, title="UI 测试")
+    project.pipeline.update({"direct": "done", "confirm": "done", "gen_assets": "done"})
+    pdir = store.project_dir(pid)
+    (pdir / "assets").mkdir(parents=True)
+    for i in range(1, 4):                       # 先落资产文件，再建资产字典
+        (pdir / "assets" / f"img_s1_v{i}.png").write_bytes(_tiny_png())
+    project.assets = {
+        f"img_s1_v{i}": Asset(
+            type="image", path=f"assets/img_s1_v{i}.png", seed=100 + i, status="done",
+        )
+        for i in range(1, 4)
+    }
+    project.scenes = [                          # 资产先于场景赋值（校验器逐次重跑）
+        Scene(scene_id="s1", narration="你好。", visual="v", image_prompt="p",
+              image_candidates=["img_s1_v1", "img_s1_v2", "img_s1_v3"],
+              image_asset_id="img_s1_v1", status="done"),
+    ]
+    store.create(project)
+    return store
+
+
+def _has_button(at: AppTest, key: str) -> bool:
+    """AppTest 按钮按 key 查询缺失时抛 KeyError（WidgetList 语义）→ 转布尔。"""
+    try:
+        at.button(key=key)
+        return True
+    except KeyError:
+        return False
+
+
+def test_storyboard_narration_editable_and_persists(at: AppTest) -> None:
+    """文案可编辑（M6 守卫放开）：保存后落盘，direct 保持 done，confirm 起失效。"""
+    _mk_project(scenes=SCENES, pipeline={"direct": "done", "confirm": "done"})
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    at.text_area(key="narration_proj_ui_s1").set_value("新文案。")
+    at.run()                                                    # edited=True → 保存可用
+    at.button(key="save_scenes_proj_ui").click()
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.scenes[0].narration == "新文案。"
+    assert loaded.pipeline["direct"] == "done"                  # 分镜人改保持 direct done
+    assert loaded.pipeline["confirm"] == "pending"
+    assert loaded.pipeline["gen_assets"] == "pending"
+
+
+def test_storyboard_new_fields_render_and_save(at: AppTest) -> None:
+    """M6 新字段：景别/规划时长/音效描述可编辑并落盘。"""
+    _mk_project(scenes=SCENES, pipeline={"direct": "done"})
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    at.selectbox(key="shotsize_proj_ui_s1").set_value("特写")
+    at.number_input(key="dur_proj_ui_s1").set_value(1500)
+    at.text_input(key="sfx_proj_ui_s1").set_value("风声")
+    at.run()
+    at.button(key="save_scenes_proj_ui").click()
+    at.run()
+
+    assert not at.exception
+    s1 = _store().load("proj_ui").scenes[0]
+    assert s1.shot_size == "特写"
+    assert s1.planned_duration_ms == 1500
+    assert s1.sfx == "风声"
+
+
+def test_storyboard_add_scene_appends(at: AppTest) -> None:
+    _mk_project(scenes=SCENES)
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    at.button(key="addscene_proj_ui").click()
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert [s.scene_id for s in loaded.scenes] == ["s1", "s2", "s3"]
+    assert loaded.scenes[-1].narration == ""                    # 空文案允许（gen_assets 有守卫）
+
+
+def test_storyboard_delete_scene(at: AppTest) -> None:
+    _mk_project(scenes=SCENES)
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    at.button(key="delscene_proj_ui_s2").click()
+    at.run()
+
+    assert not at.exception
+    assert [s.scene_id for s in _store().load("proj_ui").scenes] == ["s1"]
+
+
+def test_storyboard_reorder_scenes(at: AppTest) -> None:
+    _mk_project(scenes=SCENES)
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    at.button(key="moveup_proj_ui_s2").click()
+    at.run()
+
+    assert not at.exception
+    assert [s.scene_id for s in _store().load("proj_ui").scenes] == ["s2", "s1"]
+
+
+def test_candidate_gallery_and_select(at: AppTest) -> None:
+    """候选画廊：3 张候选 + 默认选中 v1 打 ✓；改选 v2 只失效 timeline/export。"""
+    _mk_candidate_project()
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    assert not at.exception
+    for v in ("v2", "v3"):                                     # 未选中者带「选中」按钮
+        assert at.button(key=f"pickimg_proj_ui_s1_img_s1_{v}")
+    assert _has_button(at, "pickimg_proj_ui_s1_img_s1_v1") is False   # 选中者只有 ✓
+    assert any("已选中 v1" in c.value for c in at.caption)
+
+    at.button(key="pickimg_proj_ui_s1_img_s1_v2").click()
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.scenes[0].image_asset_id == "img_s1_v2"
+    assert loaded.pipeline["timeline"] == "pending"             # 改选 → 时间线起重跑
+    assert loaded.pipeline["export"] == "pending"
+    assert loaded.pipeline["confirm"] == "done"                 # confirm 不动
+    assert loaded.pipeline["gen_assets"] == "done"              # 素材不重跑
+
+
+def test_reroll_dispatches_to_worker(at: AppTest, monkeypatch) -> None:
+    """重新生成候选 → 后台任务分发 edits.reroll_scene_candidates(scene_id)。"""
+    calls: list[str] = []
+
+    def fake_reroll(store, project, scene_id, image, progress=None):
+        calls.append(scene_id)
+        project.pipeline["timeline"] = "pending"                # 模拟真实落盘失效
+        store.save(project, message="web 测试 reroll")
+        return project
+
+    monkeypatch.setattr("app.core.edits.reroll_scene_candidates", fake_reroll)
+    monkeypatch.setattr("app.core.providers.make_image", lambda config: object())
+    _mk_candidate_project()
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    at.button(key="reroll_proj_ui_s1").click()
+    at.run()
+    _wait_task(at)
+    at.run()                                                    # fragment 消费 + 刷新
+
+    assert not at.exception
+    assert calls == ["s1"]
+    assert _ss(at, "task") is None
+    assert any("reroll_scene 完成" in s.value for s in at.success)
+
+
+def test_refine_button_visibility_follows_capability(at: AppTest, monkeypatch) -> None:
+    """精修按钮随渠道能力显隐：默认 siliconflow（FLUX）不支持 → 隐藏；支持 → 显示。"""
+    _mk_candidate_project()
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    assert not at.exception
+    assert _has_button(at, "refine_proj_ui_s1") is False        # 默认渠道不支持 → 隐藏
+
+    monkeypatch.setattr(
+        "app.core.providers.image_capabilities",
+        lambda config: ImageCapabilities(supports_reference_image=True, max_reference_images=1),
+    )
+    at.run()
+    assert _has_button(at, "refine_proj_ui_s1") is True         # 支持 → 显示
+
+
+def test_rewrite_dispatches_instructions(at: AppTest, monkeypatch) -> None:
+    """AI 重写 → 后台任务分发 edits.rewrite_scene(scene_id, 指令)。"""
+    calls: list[tuple] = []
+
+    def fake_rewrite(store, project, director, scene_id, instructions, progress=None):
+        calls.append((scene_id, instructions))
+        store.save(project, message="web 测试 rewrite")
+        return project
+
+    monkeypatch.setattr("app.core.edits.rewrite_scene", fake_rewrite)
+    monkeypatch.setattr("app.core.providers.make_director", lambda config: object())
+    _mk_project(scenes=SCENES)
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    at.text_input(key="rewrite_instr_proj_ui_s1").set_value("夜晚")
+    at.run()                                                    # 指令非空 → AI 重写可用
+    at.button(key="rewrite_proj_ui_s1").click()
+    at.run()
+    _wait_task(at)
+    at.run()
+
+    assert not at.exception
+    assert calls == [("s1", "夜晚")]
+    assert _ss(at, "task") is None
 
 
 # ---------------------------------------------------------------- 页面 5：成本面板

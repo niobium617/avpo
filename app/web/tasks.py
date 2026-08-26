@@ -10,11 +10,14 @@
 import threading
 from dataclasses import dataclass, field
 
-from app.core import errors, pipeline, providers
+from app.core import edits, errors, pipeline, providers
 from app.core.progress import ProgressEvent
 from app.core.project import ProjectStore
 from app.core.schema import Project
 from app.tts.tts_edge import EdgeTTS
+
+# M6-7.8 ad-hoc 单场景操作：不走 run_task（无自动重试），人类触发单次执行。
+ADHOC_NODES = ("reroll_scene", "refine_scene", "rewrite_scene")
 
 
 @dataclass
@@ -42,21 +45,62 @@ class TaskContainer:
 
 
 def start_task(store: ProjectStore, project: Project, node: str,
-               text: str = "", *, chain: bool = False) -> TaskContainer:
-    """启动后台任务（主脚本线程调用，立即返回）。daemon 线程：进程退出不滞留。"""
+               text: str = "", *, chain: bool = False,
+               scene_id: str | None = None) -> TaskContainer:
+    """启动后台任务（主脚本线程调用，立即返回）。daemon 线程：进程退出不滞留。
+
+    scene_id（M6-7.8）：ad-hoc 单场景操作（reroll/refine/rewrite）的目标场景。
+    """
     container = TaskContainer(node="chain" if chain else node)
-    args = (store, project, text, container) if chain else (store, project, node, text, container)
+    if chain:
+        args = (store, project, text, container)
+        target = _run_chain
+    else:
+        args = (store, project, node, text, scene_id, container)
+        target = _run_node
     threading.Thread(
-        target=_run_chain if chain else _run_node,
+        target=target,
         args=args,
         name=f"avpo-{container.node}", daemon=True,
     ).start()
     return container
 
 
+def _run_adhoc(store: ProjectStore, project: Project, node: str, text: str,
+               scene_id: str | None, container: TaskContainer) -> None:
+    """ad-hoc 单场景操作 worker（M6-7.8）：reroll/refine/rewrite。
+
+    与 _run_node 的管线节点不同：不走 run_task（无 done 跳过/自动重试），
+    失败直接进容器报错给创作者看 —— 人类触发单次执行，不掩盖问题。
+    """
+    try:
+        if node == "reroll_scene":
+            image = providers.make_image(project.config.image)
+            edits.reroll_scene_candidates(
+                store, project, scene_id, image, progress=container.emit
+            )
+        elif node == "refine_scene":
+            image = providers.make_image(project.config.image)
+            edits.refine_scene_image(
+                store, project, scene_id, image, progress=container.emit
+            )
+        else:  # rewrite_scene：text = 创作者重写指令
+            director = providers.make_director(project.config.llm)
+            edits.rewrite_scene(
+                store, project, director, scene_id, text, progress=container.emit
+            )
+    except Exception as exc:  # noqa: BLE001 —— 兜底：任何异常都必须进容器
+        container.finish("failed", f"{node} 异常: {exc}")
+        return
+    container.finish("done")
+
+
 def _run_node(store: ProjectStore, project: Project, node: str, text: str,
-              container: TaskContainer) -> None:
+              scene_id: str | None, container: TaskContainer) -> None:
     """单节点 worker：镜像原 app.py _run_node 语义。一切异常都落到容器（绝不吞、绝不 st.*）。"""
+    if node in ADHOC_NODES:
+        _run_adhoc(store, project, node, text, scene_id, container)
+        return
     try:
         if node == "direct":
             director = providers.make_director(project.config.llm)

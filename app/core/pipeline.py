@@ -139,7 +139,10 @@ def _gen_scene_voice(
     assets_dir = store.project_dir(project.project_id) / "assets"
 
     if not scene.narration.strip():
-        raise FatalError(f"scene {scene.scene_id} 的 narration 为空", hint="重跑 direct 生成分镜")
+        raise FatalError(
+            f"scene {scene.scene_id} 的 narration 为空",
+            hint="到分镜确认页补齐该场景文案，或删除该场景（M6 起文案可在分镜页编辑）",
+        )
 
     vo_id = f"vo_{scene.scene_id}"
     mp3_path = assets_dir / f"vo_{scene.scene_id}.mp3"

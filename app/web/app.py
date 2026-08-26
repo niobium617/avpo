@@ -27,7 +27,7 @@ from app.core import edits, env, errors, pipeline, providers, styles
 from app.web import tasks
 from app.core.cost import DEFAULT_BUDGET, summarize
 from app.core.project import ProjectStore
-from app.core.schema import PIPELINE_NODES, Brief, MotionKind, Project
+from app.core.schema import PIPELINE_NODES, Brief, MotionKind, Project, Scene, ShotSize
 from app.tts.tts_edge import EdgeTTS
 
 STATUS_COLORS = {"pending": "orange", "running": "blue", "done": "green", "failed": "red"}
@@ -291,12 +291,16 @@ def _render_export_output(store: ProjectStore, project: Project) -> None:
 
 # ---------------------------------------------------------------- 后台任务（M5）
 
-def _start_node(store: ProjectStore, project: Project, node: str, text: str = "") -> None:
-    """启动单节点后台任务：主脚本立即返回，worker 线程执行 pipeline。"""
+def _start_node(store: ProjectStore, project: Project, node: str, text: str = "",
+                scene_id: str | None = None) -> None:
+    """启动单节点后台任务：主脚本立即返回，worker 线程执行 pipeline。
+
+    scene_id（M6-7.8）：ad-hoc 单场景操作（reroll/refine/rewrite）的目标场景。
+    """
     if st.session_state.get("task") is not None:      # 双开兜底（按钮禁用为主防线）
         st.warning("已有后台任务运行中，请等待完成")
         return
-    container = tasks.start_task(store, project, node, text)
+    container = tasks.start_task(store, project, node, text, scene_id=scene_id)
     st.session_state["task"] = container
     st.session_state.pop("task_result", None)
 
@@ -397,13 +401,68 @@ def _render_pipeline(store: ProjectStore, project: Project) -> None:
     if c6.button("一键全链路", type="primary", key=f"run_all_{pid}", disabled=busy):
         _start_chain(store, project, text)
 
-    _render_task_result()
     _render_errors(project)
     _render_export_output(store, project)
-    _render_task_progress()                           # 注册并内联执行进度 fragment（放最后）
 
 
 # ---------------------------------------------------------------- 页面 3：分镜确认
+
+SHOT_SIZES = list(ShotSize.__args__)                   # 含 ""（未指定）
+
+
+def _next_scene_id(project: Project) -> str:
+    """下一个可用 scene_id：s<最大数字后缀+1>（删除后复用空闲 id，可接受）。"""
+    nums = []
+    for s in project.scenes:
+        if s.scene_id.startswith("s") and s.scene_id[1:].isdigit():
+            nums.append(int(s.scene_id[1:]))
+    return f"s{max(nums) + 1}" if nums else "s1"
+
+
+def _clear_scene_edit_keys(pid: str) -> None:
+    """清本项目分镜编辑 widget key（保存/增删/排序后调用，防脏值残留）。"""
+    for k in list(st.session_state):
+        if k.startswith(("narration_", "visual_", "imgprompt_", "motion_",
+                         "shotsize_", "dur_", "sfx_")):
+            st.session_state.pop(k, None)
+
+
+def _render_candidate_gallery(store: ProjectStore, project: Project, scene, pid: str,
+                              busy: bool) -> None:
+    """候选画廊（M6-7.5/7.8）：每镜 N 列缩略图，人审「选中」改选；reroll/refine 后台任务。
+
+    选中候选打 ✓；改选走 edits.select_image_candidate（只失效 timeline/export）。
+    refine（图生图精修）仅渠道支持参考图注入时渲染（能力标志内省）。
+    """
+    caps = providers.image_capabilities(project.config.image)
+    project_dir = store.project_dir(pid)
+    candidates = scene.image_candidates
+    if candidates:
+        cols = st.columns(len(candidates))
+        for col, cid in zip(cols, candidates):
+            asset = project.assets.get(cid)
+            with col:
+                if asset and (project_dir / asset.path).is_file():
+                    st.image(str(project_dir / asset.path))
+                if asset:
+                    st.caption(f"v{cid.rsplit('_v', 1)[-1]} · seed={asset.seed}")
+                if scene.image_asset_id == cid:
+                    st.caption(f"✓ 已选中 v{cid.rsplit('_v', 1)[-1]}")
+                elif st.button("选中", key=f"pickimg_{pid}_{scene.scene_id}_{cid}", disabled=busy):
+                    edits.select_image_candidate(store, project, scene.scene_id, cid)
+                    st.rerun()
+        r1, r2 = st.columns(2)
+        if r1.button("重新生成候选（换种子）", key=f"reroll_{pid}_{scene.scene_id}", disabled=busy):
+            _start_node(store, project, "reroll_scene", scene_id=scene.scene_id)
+        if caps.supports_reference_image:
+            if r2.button("精修（图生图）", key=f"refine_{pid}_{scene.scene_id}", disabled=busy):
+                _start_node(store, project, "refine_scene", scene_id=scene.scene_id)
+    elif scene.image_asset_id and (asset := project.assets.get(scene.image_asset_id)):
+        # M6 前旧式单图（无候选清单）：保持单图展示
+        img_path = project_dir / asset.path
+        if img_path.is_file():
+            st.image(str(img_path), width=320)
+
 
 def _render_storyboard(store: ProjectStore, project: Project) -> None:
     st.header("分镜确认")
@@ -412,8 +471,7 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
     if project.pipeline["confirm"] == "done":
         st.success("分镜已确认。若修改分镜，将重置为待确认，需重新确认。")
     if not project.scenes:
-        st.info("暂无分镜：请到「流水线」页运行 direct 生成分镜")
-        return
+        st.info("暂无分镜：请到「流水线」页运行 direct 生成分镜，或「添加分镜」从零起草")
 
     motions = list(MotionKind.__args__)
     new_scenes = []
@@ -421,20 +479,83 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
     for i, s in enumerate(project.scenes):
         title = s.narration[:24] + ("…" if len(s.narration) > 24 else "")
         with st.expander(f"{s.scene_id} · {title}", expanded=(i == 0)):
-            st.markdown(f"**文案**（不可编辑）：{s.narration}")
+            narration = st.text_area(
+                "文案", value=s.narration, key=f"narration_{pid}_{s.scene_id}",
+                help="文案改动后该场景配音/字幕自动重新合成（TTS 缓存按文案哈希失效）",
+            )
             visual = st.text_area("画面描述", value=s.visual, key=f"visual_{pid}_{s.scene_id}")
             prompt = st.text_area("生图提示词（英文）", value=s.image_prompt, key=f"imgprompt_{pid}_{s.scene_id}")
-            motion = st.selectbox("运镜", motions, index=motions.index(s.motion), key=f"motion_{pid}_{s.scene_id}")
-            st.caption(f"status={s.status}  start={s.start_ms}ms  cost={s.cost}")
-            if s.image_asset_id and (asset := project.assets.get(s.image_asset_id)):
-                img_path = store.project_dir(pid) / asset.path
-                if img_path.is_file():
-                    st.image(str(img_path), width=320)
-            if (visual, prompt, motion) != (s.visual, s.image_prompt, s.motion):
-                edited = True
-            new_scenes.append(
-                s.model_copy(update={"visual": visual, "image_prompt": prompt, "motion": motion})
+            m1, m2, m3 = st.columns(3)
+            motion = m1.selectbox(
+                "运镜", motions, index=motions.index(s.motion), key=f"motion_{pid}_{s.scene_id}",
             )
+            shot = m2.selectbox(
+                "景别", SHOT_SIZES, index=SHOT_SIZES.index(s.shot_size),
+                key=f"shotsize_{pid}_{s.scene_id}", format_func=lambda v: v or "未指定",
+            )
+            dur = m3.number_input(
+                "规划时长(ms)", min_value=0, step=100, value=s.planned_duration_ms or 0,
+                key=f"dur_{pid}_{s.scene_id}", help="对齐 BGM 节奏（0 = 未指定）",
+            )
+            sfx = st.text_input(
+                "音效描述", value=s.sfx, key=f"sfx_{pid}_{s.scene_id}",
+                help="阶段四素材自备 assets/sfx/；当前仅记录",
+            )
+            st.caption(f"status={s.status}  start={s.start_ms}ms  cost={s.cost}")
+
+            _render_candidate_gallery(store, project, s, pid, busy)
+
+            op1, op2, op3 = st.columns(3)
+            if op1.button("上移", key=f"moveup_{pid}_{s.scene_id}",
+                          disabled=busy or i == 0):
+                reordered = list(project.scenes)
+                reordered[i - 1], reordered[i] = reordered[i], reordered[i - 1]
+                edits.update_scenes(store, project, reordered)
+                _clear_scene_edit_keys(pid)
+                st.rerun()
+            if op2.button("下移", key=f"movedown_{pid}_{s.scene_id}",
+                          disabled=busy or i == len(project.scenes) - 1):
+                reordered = list(project.scenes)
+                reordered[i], reordered[i + 1] = reordered[i + 1], reordered[i]
+                edits.update_scenes(store, project, reordered)
+                _clear_scene_edit_keys(pid)
+                st.rerun()
+            if op3.button("删除", key=f"delscene_{pid}_{s.scene_id}", disabled=busy):
+                edits.update_scenes(
+                    store, project, [x for x in project.scenes if x.scene_id != s.scene_id]
+                )
+                _clear_scene_edit_keys(pid)
+                st.rerun()
+
+            ri1, ri2 = st.columns([4, 1])
+            instr = ri1.text_input(
+                "AI 重写指令", value="", key=f"rewrite_instr_{pid}_{s.scene_id}",
+                placeholder="如：画面改为夜晚，景别拉近（不填则重写画面/运镜，文案默认不动）",
+                disabled=busy,
+            )
+            if ri2.button("AI 重写", key=f"rewrite_{pid}_{s.scene_id}",
+                          disabled=busy or not instr.strip()):
+                _start_node(store, project, "rewrite_scene", text=instr, scene_id=s.scene_id)
+
+            new_scenes.append(
+                s.model_copy(update={
+                    "narration": narration, "visual": visual, "image_prompt": prompt,
+                    "motion": motion, "shot_size": shot,
+                    "planned_duration_ms": dur or None, "sfx": sfx,
+                })
+            )
+            if (narration, visual, prompt, motion, shot, dur or None, sfx) != (
+                s.narration, s.visual, s.image_prompt, s.motion, s.shot_size,
+                s.planned_duration_ms, s.sfx,
+            ):
+                edited = True
+
+    if st.button("添加分镜", key=f"addscene_{pid}", disabled=busy):
+        edits.update_scenes(
+            store, project, [*project.scenes, Scene(scene_id=_next_scene_id(project), narration="")]
+        )
+        _clear_scene_edit_keys(pid)
+        st.rerun()
 
     if st.button("保存全部修改", key=f"save_scenes_{pid}", disabled=not edited or busy):
         try:
@@ -442,9 +563,7 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
         except ValueError as exc:
             st.error(str(exc))
         else:
-            for k in list(st.session_state):          # 清本项目编辑 key，防脏值残留
-                if k.startswith(("visual_", "imgprompt_", "motion_")):
-                    st.session_state.pop(k, None)
+            _clear_scene_edit_keys(pid)
             st.success("修改已保存，下游节点已重置为待运行")
             st.rerun()
 
@@ -512,6 +631,8 @@ def main() -> None:
 
     if section == "项目管理":
         _render_projects(store)
+        _render_task_result()
+        _render_task_progress()   # fragment 全页注册：切到项目管理页也消费任务
         return
     project = _require_project(store)
     if project is None:
@@ -524,6 +645,10 @@ def main() -> None:
         _render_storyboard(store, project)
     else:
         _render_cost(project)
+    # M6-7.8 起结果区 + 进度 fragment 挂在 main：ad-hoc 任务（reroll/refine/rewrite）
+    # 从分镜确认页发起，进度/结果也在该页消费（进度条跨页可见）。
+    _render_task_result()
+    _render_task_progress()       # 注册并内联执行进度 fragment（全页放最后）
 
 
 main()

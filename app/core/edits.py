@@ -21,6 +21,7 @@ import shutil
 from pathlib import Path
 
 from app.core.pipeline import _invalidate_downstream
+from app.core.progress import ProgressCallback, ProgressEvent
 from app.core.project import ProjectStore
 from app.core.schema import PIPELINE_NODES, Asset, Brief, Project, ReferenceImage, Scene
 from app.core.styles import compose_image_prompt, load_style
@@ -165,11 +166,13 @@ def add_bgm(store: ProjectStore, project: Project, path: Path) -> Project:
 
 
 def reroll_scene_candidates(
-    store: ProjectStore, project: Project, scene_id: str, image: ImageProvider
+    store: ProjectStore, project: Project, scene_id: str, image: ImageProvider,
+    progress: ProgressCallback | None = None,
 ) -> Project:
     """候选图重 roll：换新种子重生成全部候选（人类触发单次，不走 run_task）。
 
     覆盖同 id 资产与文件（旧候选作废）；选中重置为 v1；timeline/export 重跑。
+    progress（M6-7.8）：候选级进度事件，供工作台后台任务进度条展示。
     """
     scene = _get_scene(project, scene_id)
     _ensure_image_cache(store, project, image)
@@ -177,6 +180,8 @@ def reroll_scene_candidates(
     n = project.config.image.candidates
     style = load_style(project.config.style)
     prompt = compose_image_prompt(style, project.brief, scene)
+    if progress:
+        progress(ProgressEvent("reroll_scene", f"重生成候选 0/{n}", 0.0))
 
     candidates: list[str] = []
     cost = 0.0
@@ -189,6 +194,8 @@ def reroll_scene_candidates(
             size=project.config.image.size,
             seed=random.randint(0, 10**9),          # 换新种子：与旧候选同键不冲突
         )
+        if progress:
+            progress(ProgressEvent("reroll_scene", f"重生成候选 {i}/{n}", i / n))
         project.assets[cid] = Asset(
             type="image",
             path=f"assets/{cid}.png",
@@ -206,16 +213,20 @@ def reroll_scene_candidates(
     scene.cost["image"] = cost
     _invalidate_from(project, "timeline")           # 图换了 → 时间线（含）起重跑
     store.save(project, message=f"{project.project_id}: 重 roll 候选图 {scene_id}")
+    if progress:
+        progress(ProgressEvent("reroll_scene", f"重生成候选 {n}/{n}，已默认选中 v1", 1.0))
     return project
 
 
 def refine_scene_image(
-    store: ProjectStore, project: Project, scene_id: str, image: ImageProvider
+    store: ProjectStore, project: Project, scene_id: str, image: ImageProvider,
+    progress: ProgressCallback | None = None,
 ) -> Project:
     """图生图精修：选中候选作参考 + 同种子 → 新候选 v_{k+1}，自动选中。
 
     渠道不支持参考图注入 → ValueError（UI 提示降级：改提示词后重 roll）。
     新资产附 reference_asset_id（生成时用的参考图，供追溯与缓存键隔离）。
+    progress（M6-7.8）：精修进度事件（单次调用：起 0.0 止 1.0）。
     """
     scene = _get_scene(project, scene_id)
     if not scene.image_asset_id:
@@ -238,6 +249,8 @@ def refine_scene_image(
     prompt = compose_image_prompt(style, project.brief, scene)
     k = len(scene.image_candidates) + 1
     cid = f"img_{scene_id}_v{k}"
+    if progress:
+        progress(ProgressEvent("refine_scene", "图生图精修…", 0.0))
     gen = image.generate(
         prompt,
         assets_dir / f"{cid}.png",
@@ -261,6 +274,8 @@ def refine_scene_image(
     scene.cost["image"] = scene.cost.get("image", 0.0) + gen.cost
     _invalidate_from(project, "timeline")           # 图换了 → 时间线（含）起重跑
     store.save(project, message=f"{project.project_id}: 精修 {scene_id} → {cid}")
+    if progress:
+        progress(ProgressEvent("refine_scene", f"精修完成 → {cid}（已自动选中）", 1.0))
     return project
 
 
@@ -270,16 +285,20 @@ def rewrite_scene(
     director: Director,
     scene_id: str,
     instructions: str = "",
+    progress: ProgressCallback | None = None,
 ) -> Project:
     """单场景 AI 重写（分镜编辑器「AI 重写」）：narration 默认不动，scene_id 保持。
 
     LLM 成本并入该场景累计；direct 下游全量 pending（文案/提示词可能变化 →
     素材重跑；未变场景走 TTS sidecar / 生图缓存）。
+    progress（M6-7.8）：重写进度事件（单次调用：起 0.0 止 1.0）。
     """
     if not instructions.strip():
         raise ValueError("重写指令为空")
     scene = _get_scene(project, scene_id)
     style = load_style(project.config.style)
+    if progress:
+        progress(ProgressEvent("rewrite_scene", "调用 LLM 重写分镜…", 0.0))
     new_scene, cost = director.rewrite_scene(
         scene, instructions, brief=project.brief, shot_size_hint=style.shot_size_hint
     )
@@ -288,4 +307,6 @@ def rewrite_scene(
     project.scenes[project.scenes.index(scene)] = new_scene
     _invalidate_downstream(project, "direct")
     store.save(project, message=f"{project.project_id}: 重写分镜 {scene_id}")
+    if progress:
+        progress(ProgressEvent("rewrite_scene", "重写完成（下游已重置待运行）", 1.0))
     return project
