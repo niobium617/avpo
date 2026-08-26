@@ -388,7 +388,7 @@ def _render_pipeline(store: ProjectStore, project: Project) -> None:
         )
 
     st.divider()
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1, c2, c3, c4, c5 = st.columns(5)
     if c1.button("运行 direct", key=f"run_direct_{pid}", disabled=busy):
         _start_node(store, project, "direct", text=text)
     if c2.button("运行 gen_assets", key=f"run_gen_{pid}", disabled=busy):
@@ -398,8 +398,14 @@ def _render_pipeline(store: ProjectStore, project: Project) -> None:
     if c4.button("运行 export", key=f"run_exp_{pid}", disabled=busy):
         _start_node(store, project, "export")
     c5.caption("confirm 在「分镜确认」页")
-    if c6.button("一键全链路", type="primary", key=f"run_all_{pid}", disabled=busy):
-        _start_chain(store, project, text)
+    with st.expander("自动模式（高级）"):          # M6-7.9 人审优先：全链路降级为高级选项
+        st.caption(
+            "一键全链路跳过人工确认与逐镜选图（候选默认用 v1）。"
+            "M6 默认人审：建议走 策划 → direct → 分镜确认（选图/精修）→ gen_assets 流程；"
+            "自动模式仅用于自动化或重跑场景。"
+        )
+        if st.button("一键全链路", type="primary", key=f"run_all_{pid}", disabled=busy):
+            _start_chain(store, project, text)
 
     _render_errors(project)
     _render_export_output(store, project)
@@ -466,6 +472,7 @@ def _render_candidate_gallery(store: ProjectStore, project: Project, scene, pid:
 
 def _render_storyboard(store: ProjectStore, project: Project) -> None:
     st.header("分镜确认")
+    st.caption("创作者枢纽（M6 默认人审）：先确认分镜与逐镜选图，再到「流水线」页生成素材。")
     pid = project.project_id
     busy = st.session_state.get("task") is not None      # 运行中禁改分镜：防 worker 副本覆盖
     if project.pipeline["confirm"] == "done":

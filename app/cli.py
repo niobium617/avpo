@@ -202,12 +202,16 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
     def run(
         project_id: str = typer.Argument(..., help="项目 ID"),
         text: str = typer.Option("", "--text", help="口播文案全文（direct 未完成时必需）"),
-        yes: bool = typer.Option(False, "--yes", "-y", help="跳过分镜确认（自动化/重跑）"),
+        yes: bool = typer.Option(
+            False, "--yes", "-y", help="跳过人工确认（自动/重跑模式，默认建议人工审查）",
+        ),
     ) -> None:
         """一键流水线：direct → confirm → gen_assets → timeline → export。
 
         已 done 的节点自动跳过（断点续跑）；失败的节点重试。
-        confirm 节点展示分镜后等 y/n，n 则退出（改文案重跑 direct，不标记失败）。
+        M6 人审优先：confirm 节点展示分镜后等 y/n，n 则退出（改文案重跑 direct，
+        不标记失败）；候选图默认可先用（选中 v1），建议确认前到工作台分镜确认页
+        逐镜选图/精修。--yes 仅用于自动化或重跑场景。
         """
         _load_env()
         store.init_repo()
@@ -358,11 +362,20 @@ def _style(status: str) -> str:
 
 
 def _print_storyboard(project: Project) -> None:
-    """confirm 前展示分镜：场景、运镜、文案、画面描述。"""
+    """confirm 前展示分镜：场景、运镜、景别、规划时长、文案、画面描述（M6-7.9 扩展）。"""
     console.print("[cyan]分镜预览[/cyan]")
     for s in project.scenes:
-        console.print(f"  {s.scene_id} [{s.motion}] {s.narration}")
+        meta = " ".join(
+            part for part in (
+                f"[{s.motion}]",
+                s.shot_size or "",
+                f"~{s.planned_duration_ms}ms" if s.planned_duration_ms else "",
+                f"sfx:{s.sfx}" if s.sfx else "",
+            ) if part
+        )
+        console.print(f"  {s.scene_id} {meta} {s.narration}")
         console.print(f"    画面: {s.visual}")
+    console.print("建议先到工作台「分镜确认」页逐镜选图（候选默认选中 v1）后再确认")
 
 
 app = create_app()

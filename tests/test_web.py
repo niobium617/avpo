@@ -723,6 +723,38 @@ def test_rewrite_dispatches_instructions(at: AppTest, monkeypatch) -> None:
     assert _ss(at, "task") is None
 
 
+# ---------------------------------------------------------------- 默认人审叙事（M6-7.9）
+
+def test_run_all_moved_into_advanced_expander(at: AppTest, monkeypatch) -> None:
+    """人审优先：一键全链路降级为「自动模式（高级）」expander，按钮仍触发全链路。"""
+    calls = _mock_pipeline(monkeypatch)
+    _mk_project(scenes=SCENES, pipeline={"direct": "done", "confirm": "done"})
+
+    at.run()
+    _goto(at, "流水线", pid="proj_ui")
+
+    assert not at.exception
+    assert any("自动模式" in e.label for e in at.expander)      # expander 存在
+    at.button(key="run_all_proj_ui").click()                    # expander 内按钮仍可用
+    at.run()
+    _wait_task(at)
+    at.run()
+
+    assert not at.exception
+    assert calls == ["gen_assets", "timeline", "export"]
+    assert _ss(at, "task") is None
+
+
+def test_storyboard_hub_hint_caption(at: AppTest) -> None:
+    """分镜确认页流程提示：先确认分镜与选图，再生成素材。"""
+    _mk_project(scenes=SCENES)
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    assert not at.exception
+    assert any("先确认分镜与逐镜选图" in c.value for c in at.caption)
+
+
 # ---------------------------------------------------------------- 页面 5：成本面板
 
 def test_cost_panel_metrics_and_budget(at: AppTest) -> None:
