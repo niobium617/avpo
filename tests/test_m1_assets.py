@@ -269,7 +269,10 @@ def test_real_full_chain(tmp_path: Path):
 
     ok_direct = run_direct(store, project, make_director(project.config.llm), TEXT)
     assert ok_direct, f"direct 失败: {project.errors}"
-    assert len(project.scenes) == 2
+    # 拆镜数是 LLM 的创作提案（M6 人审语义），不 pin 具体值：只要求非空，
+    # 文案逐字覆盖由 director 校验保证；下游断言按实际 scene_id 推导。
+    scene_ids = [s.scene_id for s in project.scenes]
+    assert scene_ids
 
     ok_assets = run_gen_assets(
         store, project,
@@ -281,9 +284,9 @@ def test_real_full_chain(tmp_path: Path):
     loaded = store.load("proj_live")
     assert loaded.pipeline["direct"] == "done"
     assert loaded.pipeline["gen_assets"] == "done"
-    # M6-7.5：每场景 3 候选（真实渠道按配置 candidates）
-    img_ids = {f"img_{sid}_v{i}" for sid in ("s1", "s2") for i in range(1, 4)}
-    assert set(loaded.assets) == {"vo_s1", "vo_s2"} | img_ids
+    # M6-7.5：每场景 3 候选（按实际 scene_id 推导，不 pin LLM 拆镜数）
+    img_ids = {f"img_{sid}_v{i}" for sid in scene_ids for i in range(1, 4)}
+    assert set(loaded.assets) == {f"vo_{sid}" for sid in scene_ids} | img_ids
     assert all((store.project_dir("proj_live") / a.path).is_file() for a in loaded.assets.values())
     # 字幕覆盖全文
     assert norm("".join(s.text for s in loaded.subtitles)) == norm(TEXT)

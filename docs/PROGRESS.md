@@ -2,29 +2,58 @@
 
 > 动态进度跟踪。方案见 `EXECUTION_PLAN.md`，任务拆解见 `IMPLEMENTATION_PLAN.md`。
 
-## 当前状态（2026-08-24）
+## 当前状态（2026-08-26）
 
-**M5 工作台后台线程化 + 真进度条 —— 6.1~6.3 全部完成**（183 测试全绿）
+**M6 以创作者为中心 —— 7.1~7.10 全部完成**（253 测试全绿 + 2 live 跳过）
 
 | 任务 | 产出 | 状态 |
 |---|---|---|
-| 6.1 结构化进度事件 | `app/core/progress.py`（`ProgressEvent(node/message/percent)`）+ 五节点全补 progress 回调（timeline/confirm/export 补参数；gen_assets 配音 45%/生图 55% 分段 percent）+ `ProjectStore.save` 线程锁（`_SAVE_LOCK` 串行化原子写+git 提交）+ test_pipeline/test_timeline/test_store 6 新测试 | ✅ |
-| 6.2 工作台线程化 | `app/web/tasks.py`（TaskContainer 锁容器 + worker 执行体，零 streamlit import）+ app.py 删同步执行改 `_start_node/_start_chain` + 按钮 busy 禁用 + `@st.fragment(run_every=1.0)` 进度轮询 + 完成 st.rerun 刷新 + 分镜页运行中禁改 + test_web.py 6 新用例 | ✅ |
-| 6.3 文档 | README M5 章节 + 里程碑表 + 本文件 | ✅ |
+| 7.1 schema 0.2 | Brief（12 字段）/Scene 新字段（景别·规划时长·sfx·候选·首尾帧预埋）/ReferenceImage 图组/校验扩展/load 0.1→0.2 内存升版 | ✅ |
+| 7.2 风格模板提示词模块 | prompt_prefix/prompt_lighting/quality_suffix/shot_size_hint + compose_image_prompt 确定性拼装（brief 光影覆盖模板） | ✅ |
+| 7.3 Director 简报感知 | brief/节奏/景别注入 + rewrite_scene 单镜重写（narration 默认不动/重试×2） | ✅ |
+| 7.4 vision 种子缓存 + 参考图注入 | seed 缓存键（候选互不串键）+ reference_png + 渠道能力标志（**live 验证** wanx2.1-imageedit 图生图；flux 降级） | ✅ |
+| 7.5 候选图生成 | 每镜 N 张 img_<sid>_v1..vN（种子复用断点 0 重复调用/孤儿清理/默认选 v1）+ builder 用选中图 | ✅ |
+| 7.6 edits.py 编辑 API | update_scenes 放开文案/update_brief/select_image_candidate/参考图增删/BGM 早期上传/reroll/refine/rewrite，全部落盘+按需失效下游（`_invalidate_from` 含 node 自身） | ✅ |
+| 7.7 Web 策划页 | Brief 全字段表单 + 参考图上传（angle/role/缩略图/删除）+ BGM 上传 + 渠道能力自适应提示，侧边栏五页按创作流排序 | ✅ |
+| 7.8 分镜确认页改版 | 文案可编辑/景别·规划时长·sfx/增删排序/每镜 AI 重写/候选画廊（选中✓·改选·reroll·refine 按能力显隐）+ tasks.py scene_id 参数 ad-hoc 分发（不走 run_task 无自动重试）+ 进度 fragment 挂 main 跨页可见 | ✅ |
+| 7.9 默认人审叙事 | 一键全链路降级为「自动模式（高级）」expander + 分镜页流程提示 + CLI --yes 措辞 + storyboard 打印扩展 | ✅ |
+| 7.10 文档收尾 | README M6 章（六阶段映射/渠道能力表/N=3 成本/迁移说明）+ 里程碑表 + 本文件 + versions.md schema 0.2 | ✅ |
 
-要点（M5）：
-- **线程纪律（已核实 streamlit 1.62 源码）**：worker 线程绝不调 st.*、绝不碰 st.session_state
-  （无 ScriptRunContext 时回退全局 mock 单例与本会话脱钩）——worker 只写 TaskContainer（Lock
-  保护），fragment 轮询读 snapshot()；daemon 线程进程退出不滞留。
-- **fragment 轮询**：`st.fragment(run_every=1.0)` 函数体在全页 run 时内联执行（AppTest 每次
-  at.run() 都执行）；run_every timer 由前端持有（真实运行 ~1s 轮询，AppTest 手动驱动）。
-  完成分支先 `del session_state["task"]` 再 `st.rerun()`（默认 scope="app" 是 fragment 内
-  唯一合法 scope）——防 rerun 死循环。
-- **防双开**：运行中五按钮 + 分镜编辑/确认禁用（busy 在 run 顶部计算，点击后的下一次 run
-  才渲染禁用态）；双开兜底在 `_start_node` 内检查。
-- **测试模式**：`_wait_task` 等容器 done Event（worker 独立于脚本线程）；SafeSessionState
-  无 `.get` 用 in+[]；mock 秒回时任务可能已被同 run 的 fragment 消费（task None 时断
-  task_result）。核心验收 = 慢 mock sleep 2s 而 at.run() 秒回即证非阻塞。
+要点（M6）：
+- **编辑失效语义**：`edits._invalidate_from(project, node)` 含 node 自身（update_brief/
+  候选改选/参考图增删/reroll/refine —— 编辑作废了 node 的产物）；`pipeline._invalidate_downstream`
+  仅 node 之后（update_scenes/rewrite_scene —— direct 产物已含人改保持 done，confirm 起重跑）。
+  候选改选只失效 timeline+export，gen_assets 素材不重跑。
+- **候选图种子语义**：生成时总传显式 seed（已有 seed 复用=断点续跑 0 重复调用，或新
+  random.randint），seed 进缓存键（同 prompt 的 v1/v2 不串键）；`cache.put(record_seed=...)`
+  让 seedless 调用者写 seedless 键但 sidecar 记实际 seed。精修 refine 用「选中图作参考 +
+  同种子」确定性重绘，新资产附 reference_asset_id。
+- **渠道能力降级**：`ImageProvider.supports_reference_image` 类属性 + `providers.image_capabilities`
+  无 key 内省；siliconflow 无 img2img → 策划页提示降级 + 精修按钮隐藏 + refine 抛 ValueError；
+  qwen 走 wanx2.1-imageedit（live 已验证）。
+- **ad-hoc 任务**（reroll/refine/rewrite）：`tasks.start_task(scene_id=...)` 分发到
+  `edits.*`（不走 run_task：无 done 跳过/自动重试，人类触发单次，失败直接报错）；
+  进度/结果 fragment 挂在 main()，全页可见可消费。
+- **参考图 id**：`Project.reference_seq` 计数器持久在 project.json，单调递增删除不复用。
+- **测试**：253 = 222（7.4 前）+ 31（7.5/7.6 迁移与新增）+ 5（7.7）+ 9（7.8）+ 2（7.9）；
+  AppTest 断言按钮/字幕按 key（st.image 不做断言）；file_uploader 无法在 AppTest 设置
+  → 上传逻辑在 core 层（edits.py），web 测试只断 widget 存在；`at.button(key=缺失)` 抛
+  KeyError（`_has_button` 辅助判断按钮显隐）。
+
+### 下一步
+
+- **M7 动态化**：`Scene.end_image_asset_id`（首尾帧）已预埋；PIPELINE_NODES 增 `animate`
+  节点 + 旧项目 pipeline 键插入 shim；分镜运镜指令入剪映草稿。
+- **M8 音频**：`Scene.sfx` → `assets/sfx/` 引用；`bgm_hint` 卡点剪辑（BGM 早期上传已交付）。
+- **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧（未来 `VideoClip.transition` 字段，刻意不进 0.2）。
+- 题材模板积累（templates/）；多任务并行/进度条跨页已随 7.8 部分解决（fragment 挂 main）。
+
+---
+
+## M5 工作台后台线程化 + 真进度条（2026-08-24）—— 6.1~6.3 全部完成
+
+（183 测试全绿；见 README M5 章节。要点：线程纪律/worker 只写 TaskContainer；fragment 轮询
+st.progress；按钮防双开；save 线程锁。）
 
 ## M4 Streamlit 工作台 —— 5.1~5.7 全部完成（2026-08-23）
 
@@ -133,11 +162,13 @@
 错误提示（test_errors ✅）全部验证；MVP 可交付使用。
 → ✅ **已达成**（2026-08-22）。**M3 正式关闭。**
 
-## 下一步：阶段 1 后续（候选，待定）
+## 路线图（2026-08-26 更新）
 
-- M6 候选：角色 Bible + 参考图注入（IP-Adapter / FLUX Redux 思路）；
-- Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
-- 工作台多任务并行（当前单会话单任务）；进度条跨页可见（当前只在流水线页）。
+- **M7 动态化**：首尾帧（`Scene.end_image_asset_id` 已预埋）+ 运镜指令入剪映草稿；
+- **M8 音频**：`Scene.sfx` → `assets/sfx/` 引用 + `bgm_hint` 卡点剪辑；
+- **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧；
+- 候选池：Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
+- 工作台多任务并行（当前单会话单任务）；进度条跨页已随 M6-7.8 解决（fragment 挂 main）。
 
 ## 钉版记录
 
