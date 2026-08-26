@@ -1,4 +1,4 @@
-"""AVPO Streamlit 工作台（M4）—— 项目管理 / 流水线 / 分镜确认 / 成本面板。
+"""AVPO Streamlit 工作台 —— 项目管理 / 策划 / 分镜确认 / 流水线 / 成本面板。
 
 启动（推荐，缓存目录重定向到 data/webhome，不写用户目录）：
     avpo web --port 8501
@@ -6,23 +6,28 @@
     streamlit run app/web/app.py
 
 设计约定：
-- 单文件 + 侧边栏 radio 导航（AppTest 一次只测一个入口脚本）；
+- 单文件 + 侧边栏 radio 导航（AppTest 一次只测一个入口脚本）；M6-7.7 起五页
+  按创作流排序：项目管理 → 策划 → 分镜确认 → 流水线 → 成本面板；
 - 所有 core 调用走模块引用（pipeline.run_direct / providers.make_image），
   AppTest 按 app.core.* 模块属性 monkeypatch 才能命中；
 - M5 后台任务模型：节点在 worker 线程执行（主脚本立即返回），进度经
   app/web/tasks.py 的 TaskContainer（Lock 保护）传递；UI 用
   @st.fragment(run_every=1.0) 轮询渲染 st.progress，完成自动 st.rerun 刷新徽章；
   worker 线程绝不调 st.* / 绝不碰 st.session_state；
+- M6-7.6 编辑语义：人类触发的单次编辑（策划保存/参考图/分镜修改）全部走
+  app/core/edits.py 同步落盘 + 按需失效下游（不走后台任务）；上传临时文件
+  写项目目录、处理完即删（data/ 本地 git 不上推，历史噪声可接受）；
 - widget key 带项目 id 前缀，切换项目不残留旧项目脏值。
 """
 
 import streamlit as st
+from pathlib import Path
 
 from app.core import edits, env, errors, pipeline, providers, styles
 from app.web import tasks
 from app.core.cost import DEFAULT_BUDGET, summarize
 from app.core.project import ProjectStore
-from app.core.schema import PIPELINE_NODES, MotionKind, Project
+from app.core.schema import PIPELINE_NODES, Brief, MotionKind, Project
 from app.tts.tts_edge import EdgeTTS
 
 STATUS_COLORS = {"pending": "orange", "running": "blue", "done": "green", "failed": "red"}
@@ -120,7 +125,160 @@ def _render_projects(store: ProjectStore) -> None:
     _render_new_project_form(store)
 
 
-# ---------------------------------------------------------------- 页面 2：流水线
+# ---------------------------------------------------------------- 页面 2：策划（M6-7.7）
+
+# Brief 表单字段（顺序 = 创作流）：8 基础 + 3 风格关键词包 + bgm_hint。
+# 长文本用 text_area，短值用 text_input（AppTest 按 key 断言，类型随实现走）。
+BRIEF_FIELDS: list[tuple[str, str]] = [
+    ("theme", "主题"),
+    ("worldview", "世界观"),
+    ("art_style", "整体画风"),
+    ("duration", "时长（如 60s）"),
+    ("platform", "发布平台"),
+    ("protagonist", "主角形象"),
+    ("plot", "核心剧情"),
+    ("emotion", "情绪基调"),
+]
+BRIEF_KEYWORDS: list[tuple[str, str]] = [
+    ("palette", "主色调"),
+    ("lighting", "光影指令"),
+    ("character", "人物核心特征"),
+]
+BRIEF_LONG = {"theme", "worldview", "protagonist", "plot", "character", "bgm_hint"}
+
+
+def _brief_widget(field: str, label: str, value: str, pid: str):
+    """长文本字段用 text_area，短值用 text_input（key 统一 brief_<field>_<pid>）。"""
+    key = f"brief_{field}_{pid}"
+    if field in BRIEF_LONG:
+        return st.text_area(label, value=value, key=key)
+    return st.text_input(label, value=value, key=key)
+
+
+def _render_brief(store: ProjectStore, project: Project) -> None:
+    """页面 2：策划 —— 创作简报（Brief）+ 参考图组 + BGM 早期上传（M6-7.7）。
+
+    阶段一定位：brief 是创作者的「不变量」输入，AI 按简报提案分镜与画面；
+    保存后 direct 起全下游重置待运行（update_brief 失效语义）。
+    参考图/BGM 上传为同步编辑：落盘 + 按需失效下游，不走后台任务。
+    渠道能力提示（image_capabilities）让 UI 按渠道自适应，不实例化渠道。
+    """
+    st.header("策划")
+    pid = project.project_id
+    busy = st.session_state.get("task") is not None
+    brief = project.brief or Brief()
+    if project.brief is None:
+        st.info("尚未策划：填写创作简报保存后，direct 将按简报生成分镜提案（AI 是协作者，简报是你的创作输入）。")
+
+    new_brief: dict[str, str] = {}
+    edited = False
+    st.subheader("创作简报")
+    cols = st.columns(2)
+    for i, (field, label) in enumerate(BRIEF_FIELDS):
+        with cols[i % 2]:
+            value = _brief_widget(field, label, getattr(brief, field), pid)
+        new_brief[field] = value
+        if value != getattr(brief, field):
+            edited = True
+
+    st.caption("风格关键词包（生图注入）：光影指令优先于风格模板默认光影（compose_image_prompt）")
+    kcols = st.columns(3)
+    for i, (field, label) in enumerate(BRIEF_KEYWORDS):
+        with kcols[i]:
+            value = _brief_widget(field, label, getattr(brief, field), pid)
+        new_brief[field] = value
+        if value != getattr(brief, field):
+            edited = True
+
+    bgm_hint = st.text_area(
+        "BGM 节奏/卡点描述", value=brief.bgm_hint, key=f"brief_bgm_hint_{pid}",
+        help="重拍/高潮/骤停 —— 分镜 planned_duration_ms 对齐节奏；完整卡点剪辑 M8",
+    )
+    new_brief["bgm_hint"] = bgm_hint
+    if bgm_hint != brief.bgm_hint:
+        edited = True
+
+    st.caption("保存后 direct 及下游节点将重置待运行（分镜按新简报重新生成）。")
+    if st.button("保存策划", key=f"save_brief_{pid}", disabled=not edited or busy):
+        try:
+            edits.update_brief(store, project, Brief(**new_brief))
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            for k in list(st.session_state):
+                if k.startswith("brief_"):
+                    st.session_state.pop(k, None)
+            st.success("简报已保存，direct 及下游节点已重置为待运行")
+            st.rerun()
+
+    st.divider()
+    st.subheader("参考图组（多角度）")
+    caps = providers.image_capabilities(project.config.image)
+    if caps.supports_reference_image:
+        st.caption(
+            f"当前渠道支持参考图注入（上限 {caps.max_reference_images} 张）："
+            f"已上传参考图将作为固定输入注入生图。"
+        )
+    else:
+        st.caption("当前渠道不支持参考图注入：将仅用风格关键词包保持一致（可切换渠道/模型解锁）。")
+
+    for ref in project.reference_images:
+        with st.container(border=True):
+            rc1, rc2 = st.columns([1, 5])
+            img_path = store.project_dir(pid) / ref.path
+            if img_path.is_file():
+                rc1.image(str(img_path), width=120)
+            rc2.markdown(f"**{ref.id}**  angle={ref.angle or '-'}  role={ref.role or '-'}")
+            if rc2.button("删除", key=f"delref_{pid}_{ref.id}", disabled=busy):
+                edits.remove_reference_image(store, project, ref.id)
+                st.rerun()
+
+    up = st.file_uploader(
+        "上传参考图（png/jpg）", type=["png", "jpg", "jpeg"],
+        key=f"refup_{pid}", disabled=busy,
+    )
+    angle = st.text_input("拍摄角度标签", value="", key=f"ref_angle_{pid}", placeholder="如 正面 / 侧面 / 45°仰视")
+    role = st.text_input("用途/角色标签", value="", key=f"ref_role_{pid}", placeholder="如 主角 / 场景 / 道具")
+    if up is not None:
+        # 上传临时文件写项目目录，处理完即删（data/ 本地 git 不上推）
+        tmp = store.project_dir(pid) / (".tmp_ref_upload" + (Path(up.name).suffix or ".png"))
+        tmp.write_bytes(up.getbuffer())
+        try:
+            edits.add_reference_image(store, project, tmp, angle=angle, role=role)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            for k in ("refup", "ref_angle", "ref_role"):
+                st.session_state.pop(f"{k}_{pid}", None)
+            st.success("参考图已添加，gen_assets 起重置待运行")
+            st.rerun()
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    st.divider()
+    st.subheader("BGM（早期上传）")
+    st.caption("BGM 拷贝到 assets/bgm.mp3（导出节点约定路径，emotional 模板即用此约定）；完整 BGM 选择/卡点剪辑 M8。")
+    if (store.project_dir(pid) / "assets" / "bgm.mp3").is_file():
+        st.caption("已上传 BGM")
+    bgm_up = st.file_uploader(
+        "上传 BGM（mp3）", type=["mp3"], key=f"bgmup_{pid}", disabled=busy,
+    )
+    if bgm_up is not None:
+        tmp = store.project_dir(pid) / ".tmp_bgm_upload.mp3"
+        tmp.write_bytes(bgm_up.getbuffer())
+        try:
+            edits.add_bgm(store, project, tmp)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state.pop(f"bgmup_{pid}", None)
+            st.success("BGM 已上传，export 重置待运行")
+            st.rerun()
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------- 页面 4：流水线
 
 def _render_export_output(store: ProjectStore, project: Project) -> None:
     if project.export.status == "done" and project.export.path:
@@ -299,7 +457,7 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
                 st.error(f"确认失败: {errors.describe_list(project.errors)}")
 
 
-# ---------------------------------------------------------------- 页面 4：成本面板
+# ---------------------------------------------------------------- 页面 5：成本面板
 
 def _render_cost(project: Project) -> None:
     st.header("成本面板")
@@ -335,7 +493,9 @@ def main() -> None:
 
     with st.sidebar:
         st.title("AVPO 工作台")
-        section = st.radio("功能", ["项目管理", "流水线", "分镜确认", "成本面板"], key="section")
+        section = st.radio(
+            "功能", ["项目管理", "策划", "分镜确认", "流水线", "成本面板"], key="section",
+        )
         ids = store.list_project_ids()
         if ids:
             # 创建/「选择」按钮改写的选中项：必须在 selectbox（widget key=pid）实例化
@@ -356,7 +516,9 @@ def main() -> None:
     project = _require_project(store)
     if project is None:
         return
-    if section == "流水线":
+    if section == "策划":
+        _render_brief(store, project)
+    elif section == "流水线":
         _render_pipeline(store, project)
     elif section == "分镜确认":
         _render_storyboard(store, project)

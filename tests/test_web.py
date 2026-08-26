@@ -17,8 +17,10 @@ from pathlib import Path
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from app.core import edits
 from app.core.progress import ProgressEvent
 from app.core.project import ProjectStore
+from app.core.providers import ImageCapabilities
 from app.core.schema import PipelineError, Project, Scene
 
 APP = Path(__file__).resolve().parents[1] / "app" / "web" / "app.py"
@@ -151,7 +153,7 @@ def test_pick_button_switches_project(at: AppTest) -> None:
     assert at.sidebar.selectbox(key="pid").value == "proj_b"
 
 
-# ---------------------------------------------------------------- 页面 2：流水线
+# ---------------------------------------------------------------- 页面 4：流水线
 
 def test_run_all_calls_nodes_in_order(at: AppTest, monkeypatch) -> None:
     calls = _mock_pipeline(monkeypatch)
@@ -376,6 +378,108 @@ def test_task_container_cleaned_between_tasks(at: AppTest, monkeypatch) -> None:
     assert _store().load("proj_ui").pipeline["export"] == "done"
 
 
+# ---------------------------------------------------------------- 页面 2：策划（M6-7.7）
+
+BRIEF_LONG_FIELDS = {"theme", "worldview", "protagonist", "plot", "character", "bgm_hint"}
+BRIEF_SHORT_FIELDS = {"art_style", "duration", "platform", "emotion", "palette", "lighting"}
+
+
+def test_brief_page_renders_all_fields(at: AppTest) -> None:
+    """策划页渲染 Brief 全部 12 字段 + 两个上传器；默认 siliconflow 显示能力降级提示。"""
+    _mk_project()
+    at.run()
+    _goto(at, "策划", pid="proj_ui")
+
+    assert not at.exception
+    for field in BRIEF_LONG_FIELDS:
+        assert at.text_area(key=f"brief_{field}_proj_ui").value == ""
+    for field in BRIEF_SHORT_FIELDS:
+        assert at.text_input(key=f"brief_{field}_proj_ui").value == ""
+    assert at.file_uploader(key="refup_proj_ui")
+    assert at.file_uploader(key="bgmup_proj_ui")
+    # 默认渠道 siliconflow（FLUX）不支持参考图注入 → 降级提示
+    assert any("不支持参考图" in c.value for c in at.caption)
+
+
+def test_brief_save_persists_and_invalidates_from_direct(at: AppTest) -> None:
+    _mk_project()
+    at.run()
+    _goto(at, "策划", pid="proj_ui")
+
+    at.text_area(key="brief_theme_proj_ui").set_value("赛博朋克都市")
+    at.run()                                                    # edited=True → 保存按钮可用
+    at.button(key="save_brief_proj_ui").click()
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.brief.theme == "赛博朋克都市"
+    assert loaded.pipeline["direct"] == "pending"              # 简报是 direct 的输入
+    assert loaded.pipeline["confirm"] == "pending"
+    assert loaded.pipeline["export"] == "pending"
+
+
+def _tiny_png() -> bytes:
+    """合法 1x1 PNG（st.image 会用 PIL 解码，假字节会抛 UnidentifiedImageError）。"""
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)    # 1x1, 8-bit, RGB
+    idat = zlib.compress(b"\x00\xff\x00\x00")             # 一个绿像素
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+def test_reference_list_and_delete(at: AppTest, tmp_path) -> None:
+    """参考图列表展示 id/angle/role，删除按钮走 remove_reference_image 并失效 gen_assets。"""
+    store = _store()
+    store.init_repo()
+    project = Project(project_id="proj_ui", title="UI 测试")
+    store.create(project)
+    src = tmp_path / "ref.png"
+    src.write_bytes(_tiny_png())
+    edits.add_reference_image(store, project, src, angle="正面", role="主角")
+
+    at.run()
+    _goto(at, "策划", pid="proj_ui")
+
+    assert not at.exception
+    assert any("ref_1" in m.value for m in at.markdown)
+    at.button(key="delref_proj_ui_ref_1").click()
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.reference_images == []
+    assert loaded.pipeline["gen_assets"] == "pending"
+
+
+def test_bgm_uploader_and_convention_caption(at: AppTest) -> None:
+    _mk_project()
+    at.run()
+    _goto(at, "策划", pid="proj_ui")
+
+    assert not at.exception
+    assert at.file_uploader(key="bgmup_proj_ui")
+    assert any("assets/bgm.mp3" in c.value for c in at.caption)
+
+
+def test_capability_caption_supports_reference_image(at: AppTest, monkeypatch) -> None:
+    """渠道能力提示随 image_capabilities 自适应：支持注入时显示上限张数。"""
+    monkeypatch.setattr(
+        "app.core.providers.image_capabilities",
+        lambda config: ImageCapabilities(supports_reference_image=True, max_reference_images=1),
+    )
+    _mk_project()
+    at.run()
+    _goto(at, "策划", pid="proj_ui")
+
+    assert not at.exception
+    assert any("支持参考图" in c.value and "上限 1 张" in c.value for c in at.caption)
+
+
 # ---------------------------------------------------------------- 页面 3：分镜确认
 
 def test_storyboard_edit_saves_and_invalidates(at: AppTest) -> None:
@@ -411,7 +515,7 @@ def test_confirm_button_marks_done(at: AppTest) -> None:
     assert _store().load("proj_ui").pipeline["confirm"] == "done"
 
 
-# ---------------------------------------------------------------- 页面 4：成本面板
+# ---------------------------------------------------------------- 页面 5：成本面板
 
 def test_cost_panel_metrics_and_budget(at: AppTest) -> None:
     scenes = [Scene(scene_id="s1", narration="你好。", visual="v", image_prompt="p",
