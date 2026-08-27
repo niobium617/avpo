@@ -112,6 +112,8 @@ def _run_node(store: ProjectStore, project: Project, node: str, text: str,
             ok = pipeline.run_gen_assets(
                 store, project, EdgeTTS(project.config.tts), image, progress=container.emit
             )
+        elif node == "animate":
+            ok = pipeline.run_animate(store, project, progress=container.emit)
         elif node == "timeline":
             ok = pipeline.run_timeline(store, project, progress=container.emit)
         else:  # export
@@ -144,6 +146,9 @@ def _run_chain(store: ProjectStore, project: Project, text: str,
             ):
                 container.finish("failed", errors.describe_list(project.errors))
                 return
+        if not pipeline.run_animate(store, project, progress=container.emit):
+            container.finish("failed", errors.describe_list(project.errors))
+            return
         if not pipeline.run_timeline(store, project, progress=container.emit):
             container.finish("failed", errors.describe_list(project.errors))
             return

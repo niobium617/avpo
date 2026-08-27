@@ -435,10 +435,12 @@ def _clear_scene_edit_keys(pid: str) -> None:
 
 def _render_candidate_gallery(store: ProjectStore, project: Project, scene, pid: str,
                               busy: bool) -> None:
-    """候选画廊（M6-7.5/7.8）：每镜 N 列缩略图，人审「选中」改选；reroll/refine 后台任务。
+    """候选画廊（M6-7.5/7.8 + M7-8.8）：每镜 N 列缩略图，人审「选中」改选 + 「结束帧」；
+    reroll/refine 后台任务。
 
-    选中候选打 ✓；改选走 edits.select_image_candidate（只失效 timeline/export）。
-    refine（图生图精修）仅渠道支持参考图注入时渲染（能力标志内省）。
+    选中候选打 ✓（首帧，时间线用）；结束帧（首尾帧）独立选择 —— animate 节点渲染为
+    配音后的 0.4s 静态尾拍（硬切，转场属 M9），走 edits.select_end_frame/clear_end_frame
+    （animate 起重跑）。refine（图生图精修）仅渠道支持参考图注入时渲染（能力标志内省）。
     """
     caps = providers.image_capabilities(project.config.image)
     project_dir = store.project_dir(pid)
@@ -457,6 +459,17 @@ def _render_candidate_gallery(store: ProjectStore, project: Project, scene, pid:
                 elif st.button("选中", key=f"pickimg_{pid}_{scene.scene_id}_{cid}", disabled=busy):
                     edits.select_image_candidate(store, project, scene.scene_id, cid)
                     st.rerun()
+                if scene.end_image_asset_id == cid:
+                    st.caption("◼ 结束帧")
+                    if st.button("取消结束帧", key=f"clearendf_{pid}_{scene.scene_id}_{cid}",
+                                 disabled=busy):
+                        edits.clear_end_frame(store, project, scene.scene_id)
+                        st.rerun()
+                elif st.button("设为结束帧", key=f"setendf_{pid}_{scene.scene_id}_{cid}",
+                               disabled=busy):
+                    edits.select_end_frame(store, project, scene.scene_id, cid)
+                    st.rerun()
+        st.caption("结束帧 = 镜头结束画面：渲染为配音后的静态尾拍（约 0.4s，硬切）")
         r1, r2 = st.columns(2)
         if r1.button("重新生成候选（换种子）", key=f"reroll_{pid}_{scene.scene_id}", disabled=busy):
             _start_node(store, project, "reroll_scene", scene_id=scene.scene_id)
