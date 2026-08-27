@@ -19,8 +19,9 @@ ShotSize = Literal["远景", "全景", "中景", "近景", "特写", "空镜", "
 # LLM/生图渠道：siliconflow（FLUX + DeepSeek-V3）或 dashscope（通义万相 + qwen）
 ProviderKind = Literal["siliconflow", "dashscope"]
 
-# 编排层状态机节点（IMPLEMENTATION_PLAN §5）
-PIPELINE_NODES = ("direct", "confirm", "gen_assets", "timeline", "export")
+# 编排层状态机节点（IMPLEMENTATION_PLAN §5；M7-8.1 增 animate —— 运镜/首尾帧动态化，
+# 夹在 gen_assets 与 timeline 之间：动画计划先解析落盘，时间线才组装尾拍）
+PIPELINE_NODES = ("direct", "confirm", "gen_assets", "animate", "timeline", "export")
 
 
 class StrictModel(BaseModel):
@@ -97,6 +98,22 @@ class ReferenceImage(StrictModel):
     role: str = ""              # 用途/角色标签（主角/场景/道具…）
 
 
+class MotionPlan(StrictModel):
+    """M7-8.1 animate 节点产物：场景运镜的关键帧计划（剪映草稿运镜动画的唯一消费点）。
+
+    关键帧语义（pyJianYingDraft 0.3.0 KeyframeProperty，线性插值）：
+    - uniform_scale：1.0 = 不缩放，值域 ≥ 0（缩放式运镜的起点/终点）；
+    - position_x：右移为正，单位 = 半个画布宽（摇镜的起点/终点，配恒 1.15 缩放防露边）。
+    end_frame_ms = 首尾帧尾拍时长（>0 = 该场景设了结束帧，时间线在配音后追加尾拍）。
+    """
+
+    scale_from: float = 1.0
+    scale_to: float = 1.0
+    pan_from: float = 0.0
+    pan_to: float = 0.0
+    end_frame_ms: int = Field(default=0, ge=0)
+
+
 class Scene(StrictModel):
     """一个分镜：一段口播文案 + 一张图（候选多张）+ 一个运镜。
 
@@ -111,8 +128,9 @@ class Scene(StrictModel):
     image_prompt: str = ""      # 生图提示词（英文，可变「主体+动作+场景」模块）
     image_asset_id: str | None = None   # 人审选中的候选图（时间线用）
     image_candidates: list[str] = Field(default_factory=list)   # 候选图资产 id（gen_assets 写入）
-    end_image_asset_id: str | None = None   # M7 首尾帧：镜头结束帧（阶段三动态化输入）
+    end_image_asset_id: str | None = None   # M7 首尾帧：镜头结束帧（从候选图选，animate 渲染为尾拍）
     motion: MotionKind = "none"
+    motion_plan: MotionPlan | None = None   # M7-8.1 animate 节点写入的关键帧运镜计划（None = 未跑 animate）
     shot_size: ShotSize = ""    # 景别
     planned_duration_ms: int | None = None   # 规划时长（预估；时间线以配音实测为准）
     sfx: str = ""               # 音效描述（阶段四；素材自备 assets/sfx/）
@@ -141,6 +159,7 @@ class VideoClip(StrictModel):
     start_ms: int = 0
     duration_ms: int
     motion: MotionKind = "none"
+    scene_id: str = ""   # M7-8.1 归属场景（timeline 组装写入；导出据此取 scene.motion_plan 渲染运镜）
 
 
 class AudioClip(StrictModel):
@@ -192,7 +211,7 @@ class PipelineError(StrictModel):
 class Project(StrictModel):
     project_id: str
     title: str = ""
-    schema_version: str = "0.2"   # M6-7.1：0.1 → 0.2（增量字段，旧 JSON 直接加载，load 时内存升版）
+    schema_version: str = "0.3"   # M7-8.1：0.2 → 0.3（增量字段，旧 JSON 直接加载，load 时内存升版）
     config: ProjectConfig = Field(default_factory=ProjectConfig)
     brief: Brief | None = None    # M6-7.1 阶段一策划简报（None = 旧项目/未策划）
     reference_images: list[ReferenceImage] = Field(default_factory=list)   # M6-7.1 参考图组
@@ -227,11 +246,13 @@ class Project(StrictModel):
             if sub.scene_id not in scene_ids:
                 raise ValueError(f"字幕引用了不存在的 scene_id: {sub.scene_id}")
 
-        # 时间线素材引用存在的 asset
+        # 时间线素材引用存在的 asset；M7-8.1：clip.scene_id（非空时）引用存在的 scene
         asset_ids = set(self.assets)
         for clip in self.timeline.video:
             if clip.asset_id not in asset_ids:
                 raise ValueError(f"时间线视频轨引用了不存在的 asset_id: {clip.asset_id}")
+            if clip.scene_id and clip.scene_id not in scene_ids:
+                raise ValueError(f"视频轨 clip 引用了不存在的 scene_id: {clip.scene_id}")
         for clip in self.timeline.voiceover:
             if clip.asset_id not in asset_ids:
                 raise ValueError(f"时间线音频轨引用了不存在的 asset_id: {clip.asset_id}")

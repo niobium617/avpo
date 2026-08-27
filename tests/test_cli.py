@@ -154,6 +154,7 @@ def _mock_pipeline(monkeypatch) -> dict:
     monkeypatch.setattr("app.cli.make_image", lambda config: None)
     monkeypatch.setattr("app.cli.run_direct", record("direct"))
     monkeypatch.setattr("app.cli.run_gen_assets", record("gen_assets"))
+    monkeypatch.setattr("app.cli.run_animate", record("animate"))
     monkeypatch.setattr("app.cli.run_timeline", record("timeline"))
     monkeypatch.setattr("app.cli.run_export", record("export"))
     return calls
@@ -180,7 +181,7 @@ def test_run_full_chain_yes(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert "run 完成" in result.output
     assert "总耗时" in result.output
-    for node in ("direct", "gen_assets", "timeline", "export"):
+    for node in ("direct", "gen_assets", "animate", "timeline", "export"):
         assert calls.get(node) == 1, f"{node} 未被调用: {calls}"
     # confirm 节点由真实 run_confirm 落盘
     project = ProjectStore(tmp_path / "data").load("proj_001")

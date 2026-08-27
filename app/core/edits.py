@@ -6,6 +6,7 @@
 - update_scenes          分镜编辑（文案可改/增删/排序）→ direct 起全下游重跑
 - update_brief           创作简报 → direct 起全下游重跑
 - select_image_candidate 候选图改选 → 只失效 timeline/export（素材不重跑）
+- select/clear_end_frame  首尾帧设置/清除（M7：从候选图选结束帧）→ animate 起重跑
 - add/remove_reference_image  参考图图组管理（多角度/角色标签）
 - add_bgm                BGM 早期上传 → export 重跑
 - reroll_scene_candidates 候选图换种子重 roll（人类触发单次）
@@ -95,6 +96,32 @@ def select_image_candidate(store: ProjectStore, project: Project, scene_id: str,
     scene.image_asset_id = asset_id
     _invalidate_from(project, "timeline")
     store.save(project, message=f"{project.project_id}: 选中候选图 {asset_id}")
+    return project
+
+
+def select_end_frame(
+    store: ProjectStore, project: Project, scene_id: str, asset_id: str,
+) -> Project:
+    """首尾帧设置（M7-8.7）：从候选图里选镜头结束帧 → animate 起重跑。
+
+    结束帧渲染为配音后的静态尾拍（尾拍时长 = app/core/motion.py END_FRAME_MS，
+    由 animate 节点解析进 scene.motion_plan.end_frame_ms）；不额外生图（0 API 成本）。
+    """
+    scene = _get_scene(project, scene_id)
+    if asset_id not in scene.image_candidates:
+        raise ValueError(f"{asset_id} 不在 {scene_id} 的候选清单中: {scene.image_candidates}")
+    scene.end_image_asset_id = asset_id
+    _invalidate_from(project, "animate")            # 运镜计划要重解析（尾拍时长变化）
+    store.save(project, message=f"{project.project_id}: 设置 {scene_id} 结束帧 {asset_id}")
+    return project
+
+
+def clear_end_frame(store: ProjectStore, project: Project, scene_id: str) -> Project:
+    """清除首尾帧（M7-8.7）：不再渲染尾拍，animate 起重跑。"""
+    scene = _get_scene(project, scene_id)
+    scene.end_image_asset_id = None
+    _invalidate_from(project, "animate")
+    store.save(project, message=f"{project.project_id}: 清除 {scene_id} 结束帧")
     return project
 
 

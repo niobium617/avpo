@@ -79,8 +79,10 @@ def project_dir(tmp_path: Path) -> tuple[Path, Project]:
         ],
         timeline=Timeline(
             video=[
-                VideoClip(asset_id="a_img_1", start_ms=0, duration_ms=200, motion="zoom_in_slow"),
-                VideoClip(asset_id="a_img_2", start_ms=200, duration_ms=280, motion="pan_left"),
+                VideoClip(asset_id="a_img_1", start_ms=0, duration_ms=200,
+                          motion="zoom_in_slow", scene_id="s1"),
+                VideoClip(asset_id="a_img_2", start_ms=200, duration_ms=280,
+                          motion="pan_left", scene_id="s2"),
             ],
             voiceover=[AudioClip(asset_id="a_vo", offset_ms=0)],
         ),
@@ -153,17 +155,36 @@ def test_export_self_contained_materials(project_dir: tuple[Path, Project]) -> N
             assert draft_dir in path.parents, f"素材未拷入草稿目录: {path}"
 
 
+def _keyframe_map(segment: dict) -> dict[str, list[tuple[int, float]]]:
+    """按属性名取关键帧列表: {property_type: [(time_offset_us, value), ...]}。"""
+    out: dict[str, list[tuple[int, float]]] = {}
+    for kf_list in segment.get("common_keyframes", []):
+        out[kf_list["property_type"]] = [
+            (kf["time_offset"], kf["values"][0]) for kf in kf_list["keyframe_list"]
+        ]
+    return out
+
+
 def test_export_motion_mapping(project_dir: tuple[Path, Project]) -> None:
-    """zoom_in_slow 段有动画引用；pan_left（暂无映射）不加动画。"""
+    """M7 关键帧运镜：zoom 段缩放 1.0→1.15；pan 段横移 -0.12→+0.12 + 恒 1.15 缩放。
+
+    本 fixture 场景无 motion_plan（未跑 animate）—— 走导出兜底（resolve_motion_plan
+    按 scene.motion 解析，旧项目同路径）；不写任何入场动画素材。
+    """
     proj, project = project_dir
     draft = _load_draft(export(project, proj, proj / "exports"))
 
     video_segments = [t for t in draft["tracks"] if t["type"] == "video"][0]["segments"]
     zoom_seg, pan_seg = video_segments
-    anim_ids = {m["id"] for m in draft["materials"]["material_animations"]}
-    assert zoom_seg["target_timerange"]["start"] == 0
-    assert anim_ids & set(zoom_seg["extra_material_refs"]), "zoom 段应引用动画素材"
-    assert not (anim_ids & set(pan_seg["extra_material_refs"])), "pan 段不应有动画"
+    assert draft["materials"]["material_animations"] == [], "M7 起不用入场动画素材"
+
+    zoom = _keyframe_map(zoom_seg)
+    assert zoom["KFTypeScaleX"] == [(0, 1.0), (200_000, 1.15)]
+    assert "KFTypePositionX" not in zoom
+
+    pan = _keyframe_map(pan_seg)
+    assert pan["KFTypeScaleX"] == [(0, 1.15), (280_000, 1.15)], "pan 恒 1.15 缩放防露边"
+    assert pan["KFTypePositionX"] == [(0, -0.12), (280_000, 0.12)]
 
 
 def test_export_timerange_conversion(project_dir: tuple[Path, Project]) -> None:

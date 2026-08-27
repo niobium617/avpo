@@ -28,6 +28,7 @@ import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from app.core.motion import resolve_motion_plan
 from app.core.progress import ProgressCallback, ProgressEvent
 from app.core.project import ProjectStore
 from app.core.schema import PIPELINE_NODES, Asset, Project, Scene
@@ -237,6 +238,35 @@ def _gen_scene_candidates(
     scene.image_asset_id = scene.image_asset_id if scene.image_asset_id in keep else f"{base}_v1"
     scene.cost["image"] = cost
     scene.status = "done"
+
+
+def run_animate(
+    store: ProjectStore, project: Project, progress: ProgressCallback | None = None,
+) -> bool:
+    """animate 节点（M7-8.4）：scene.motion + 首尾帧 → 关键帧运镜计划落盘。
+
+    逐场景调用 resolve_motion_plan（app/core/motion.py 唯一解析点）写入
+    scene.motion_plan；参数只在这里落盘（可审计可调），timeline 按
+    plan.end_frame_ms 追加首尾帧尾拍，export 按 plan 渲染运镜关键帧。
+    纯本地解析（无 API 调用），产物是剪映草稿运镜动画的唯一消费输入。
+    """
+    def fn(p: Project) -> None:
+        # 前置依赖：素材链路必须先完成（运镜计划是素材之后的动态化阶段）
+        if p.pipeline["gen_assets"] != "done":
+            raise FatalError(
+                f"gen_assets 未完成（{p.pipeline['gen_assets']}），无法解析运镜计划",
+                hint="先跑 avpo gen-assets",
+            )
+        for i, scene in enumerate(p.scenes):
+            scene.motion_plan = resolve_motion_plan(scene)
+            if progress:
+                progress(ProgressEvent(
+                    "animate", f"解析运镜 {i + 1}/{len(p.scenes)}（{scene.scene_id}）",
+                    (i + 1) / len(p.scenes),
+                ))
+        _invalidate_downstream(p, "animate")
+
+    return run_task(store, project, "animate", fn)
 
 
 def run_timeline(store: ProjectStore, project: Project, progress: ProgressCallback | None = None) -> bool:

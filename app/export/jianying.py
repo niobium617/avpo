@@ -3,8 +3,12 @@
 实现依据：docs/jyd_notes.md（pyJianYingDraft 0.3.0 实测）。
 - 时间单位换算：project.json 毫秒 → 剪映草稿微秒（×1000）。
 - 素材先拷入草稿目录再建素材引用 → 草稿自包含，zip 可迁移。
-- 运镜动画：zoom_in_slow/zoom_out 映射剪映入场动画（枚举中文名）；pan_* 暂无对应
-  动画枚举，先降级为 none 不加动画（M2 扩展），不阻塞主线（IMPLEMENTATION_PLAN §7）。
+- M7-8.6 运镜动画：全部用关键帧实现（KeyframeProperty.uniform_scale / position_x
+  线性插值），覆盖 zoom_in_slow / zoom_out / pan_left / pan_right —— M2 曾把
+  pan_* 降级为无动画（无入场动画枚举），M7 解除该限制。参数取自
+  scene.motion_plan（animate 节点解析落盘）；旧项目没跑 animate 时按
+  scene.motion 兜底解析（app/core/motion.py 与 animate 同源）。首尾帧尾拍
+  （motion=none 的 clip）按通用视频轨导出，不加任何动画（转场属 M9）。
 - M2-3.2 扩展：字幕样式（字号/居中/描边/低位）、配音段淡入淡出、草稿元信息
   （draft_name/tm_duration）。封面由剪映取首帧自动生成 —— 首段从 0 起即首图。
 """
@@ -18,7 +22,7 @@ from pyJianYingDraft import (  # noqa: N999 —— 包名本身大写
     AudioSegment,
     ClipSettings,
     DraftFolder,
-    IntroType,
+    KeyframeProperty,
     TextBorder,
     TextSegment,
     TextStyle,
@@ -28,16 +32,9 @@ from pyJianYingDraft import (  # noqa: N999 —— 包名本身大写
     trange,
 )
 
-from app.core.schema import Project
+from app.core.motion import resolve_motion_plan
+from app.core.schema import MotionPlan, Project
 from app.core.styles import load_style
-
-# 运镜 → 剪映入场动画（中文枚举名，见 jyd_notes §2）
-_MOTION_ANIMATION = {
-    "zoom_in_slow": "放大",
-    "zoom_out": "缩小",
-}
-# 动画时长上限：长片段不让入场动画拖太久（demo 实测 0.8~1s 观感 OK）
-_ANIM_MAX_MS = 2000
 
 # 草稿内的固定轨道名（MVP 固定三轨，见 EXECUTION_PLAN §1-决策5；BGM 为 M3-4.4 可选第 4 轨）
 _TRACK_VIDEO = "v1"
@@ -104,7 +101,8 @@ def export(
     if bgm_draft_path:
         draft.append_track(TrackSpec(TrackType.audio, _TRACK_BGM))
 
-    # 视频轨：图片/视频素材 + 运镜入场动画
+    # 视频轨：图片/视频素材 + M7 关键帧运镜（参数取自场景运镜计划）
+    scene_map = {s.scene_id: s for s in project.scenes}
     for clip in project.timeline.video:
         asset = project.assets[clip.asset_id]
         if asset.type not in ("image", "video"):
@@ -113,7 +111,20 @@ def export(
             str(draft_paths[clip.asset_id]),
             trange(clip.start_ms * 1000, clip.duration_ms * 1000),
         )
-        _apply_motion(segment, clip.motion, clip.duration_ms)
+        scene = scene_map.get(clip.scene_id)
+        if scene is None and not clip.scene_id:
+            # 旧项目兜底（0.2 及以前：clip 无 scene_id）：按图资产 id 前缀找回场景
+            scene = next(
+                (s for s in project.scenes
+                 if clip.asset_id == f"img_{s.scene_id}"
+                 or clip.asset_id.startswith(f"img_{s.scene_id}_")),
+                None,
+            )
+        # 运镜只属于主镜头 clip：motion=none 的段（首尾帧尾拍/静态段）不套场景计划
+        plan = scene.motion_plan if (scene and clip.motion != "none") else None
+        if plan is None and scene is not None and clip.motion != "none":
+            plan = resolve_motion_plan(scene)   # 旧项目兜底：没跑 animate 也按 motion 出运镜
+        _apply_motion_plan(segment, plan, clip.duration_ms)
         draft.add_segment(segment, _TRACK_VIDEO)
 
     # 音频轨：时长优先级 clip.duration_ms（时间线组装写入）> voiceover.duration_ms
@@ -172,12 +183,21 @@ def export(
     return Path(draft.save_path).parent
 
 
-def _apply_motion(segment: VideoSegment, motion: str, duration_ms: int) -> None:
-    """运镜 → 入场动画；未知运镜降级为 none（不加动画，不阻塞导出）。"""
-    anim_name = _MOTION_ANIMATION.get(motion)
-    if anim_name is None:
+def _apply_motion_plan(segment: VideoSegment, plan: MotionPlan | None, duration_ms: int) -> None:
+    """关键帧运镜：按计划在片段首尾写缩放/横移关键帧（线性插值，微秒单位）。
+
+    只写有变化的属性（默认值不写关键帧）：缩放计划（zoom/pan 恒 1.15 防露边）
+    写 uniform_scale，横移计划写 position_x；none/未知运镜 = 空计划，不加任何动画。
+    """
+    if plan is None:
         return
-    segment.add_animation(IntroType[anim_name], f"{min(duration_ms, _ANIM_MAX_MS) / 1000:.2f}s")
+    end_us = duration_ms * 1000
+    if plan.scale_from != 1.0 or plan.scale_to != 1.0:
+        segment.add_keyframe(KeyframeProperty.uniform_scale, 0, plan.scale_from)
+        segment.add_keyframe(KeyframeProperty.uniform_scale, end_us, plan.scale_to)
+    if plan.pan_from != 0.0 or plan.pan_to != 0.0:
+        segment.add_keyframe(KeyframeProperty.position_x, 0, plan.pan_from)
+        segment.add_keyframe(KeyframeProperty.position_x, end_us, plan.pan_to)
 
 
 def _copy_to_materials(src: Path, materials_dir: Path) -> Path:

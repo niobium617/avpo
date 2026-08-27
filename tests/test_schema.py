@@ -51,7 +51,7 @@ def test_unknown_pipeline_node_rejected(sample_project: Project) -> None:
 
 def test_new_project_has_all_pipeline_nodes() -> None:
     project = Project(project_id="proj_x")
-    assert list(project.pipeline) == ["direct", "confirm", "gen_assets", "timeline", "export"]
+    assert list(project.pipeline) == ["direct", "confirm", "gen_assets", "animate", "timeline", "export"]
     assert all(v == "pending" for v in project.pipeline.values())
 
 
@@ -61,17 +61,17 @@ def test_status_assignment_validated(sample_project: Project) -> None:
         sample_project.scenes[0].status = "finished"  # type: ignore[assignment]
 
 
-# ---------------------------------------------------------------- M6-7.1 schema 0.2
+# ---------------------------------------------------------------- M6-7.1 schema 0.2 / M7-8.1 0.3
 
-def test_new_project_schema_version_020() -> None:
-    """M6：新项目 schema_version = 0.2，pipeline 节点不变。"""
-    project = Project(project_id="proj_m6")
-    assert project.schema_version == "0.2"
-    assert list(project.pipeline) == ["direct", "confirm", "gen_assets", "timeline", "export"]
+def test_new_project_schema_version_030() -> None:
+    """M7：新项目 schema_version = 0.3，pipeline 含 animate 节点。"""
+    project = Project(project_id="proj_m7")
+    assert project.schema_version == "0.3"
+    assert list(project.pipeline) == ["direct", "confirm", "gen_assets", "animate", "timeline", "export"]
 
 
 def test_legacy_json_loads_with_new_defaults() -> None:
-    """旧 JSON（schema 0.1，无 M6 键）加载：新字段全部落到默认值。"""
+    """旧 JSON（schema 0.1，无 M6/M7 键）加载：新字段全部落到默认值。"""
     data = {
         "project_id": "legacy",
         "schema_version": "0.1",
@@ -88,6 +88,24 @@ def test_legacy_json_loads_with_new_defaults() -> None:
     assert s.image_candidates == []
     assert s.end_image_asset_id is None
     assert s.image_asset_id is None
+    assert s.motion_plan is None                   # M7-8.1：未跑 animate 无运镜计划
+
+
+def test_motion_plan_roundtrip() -> None:
+    """MotionPlan 全字段 dump/validate 无损（M7 运镜计划）。"""
+    from app.core.schema import MotionPlan
+
+    plan = MotionPlan(scale_from=1.0, scale_to=1.15, pan_from=-0.12, pan_to=0.12, end_frame_ms=400)
+    reloaded = MotionPlan.model_validate(plan.model_dump(mode="json"))
+    assert reloaded.model_dump(mode="json") == plan.model_dump(mode="json")
+
+
+def test_clip_scene_id_ghost_rejected(sample_project: Project) -> None:
+    """视频轨 clip 的 scene_id 引用不存在的场景 → 拒绝（M7-8.1）。"""
+    data = sample_project.model_dump(mode="json")
+    data["timeline"]["video"][0]["scene_id"] = "s_ghost"
+    with pytest.raises(ValidationError, match="不存在的 scene_id"):
+        Project.model_validate(data)
 
 
 def test_brief_roundtrip() -> None:

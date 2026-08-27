@@ -123,10 +123,10 @@ def test_save_serialized_across_threads(store: ProjectStore, sample_project: Pro
     assert loaded.project_id == "proj_001"
 
 
-# ---- M6-7.1 schema 0.1 → 0.2 升版 shim ----
+# ---- M7-8.3 升版 shim（0.1/0.2 → 0.3）----
 
-def test_load_legacy_v01_json_reports_020_in_memory(store: ProjectStore) -> None:
-    """手写 v0.1 JSON（无任何 M6 键）：加载成功，内存版本升 0.2，文件不变。"""
+def test_load_legacy_v01_json_reports_030_in_memory(store: ProjectStore) -> None:
+    """手写 v0.1 JSON（无任何 M6/M7 键）：加载成功，内存版本升 0.3，文件不变。"""
     legacy = (
         '{"project_id": "old", "schema_version": "0.1", "title": "旧项目",'
         ' "pipeline": {"direct": "pending", "confirm": "pending", "gen_assets": "pending",'
@@ -136,16 +136,17 @@ def test_load_legacy_v01_json_reports_020_in_memory(store: ProjectStore) -> None
     store.json_path("old").write_text(legacy, encoding="utf-8")
 
     loaded = store.load("old")
-    assert loaded.schema_version == "0.2"           # 内存升版
+    assert loaded.schema_version == "0.3"           # 内存升版
+    assert loaded.pipeline["animate"] == "pending"  # 旧 5 节点 pipeline 补新键
     assert loaded.brief is None                     # 新字段默认
     assert "0.1" in store.json_path("old").read_text(encoding="utf-8")   # 文件未迁移
 
 
-def test_save_persists_020(store: ProjectStore, sample_project: Project) -> None:
-    """升版后的项目 save 时持久化 0.2。"""
+def test_save_persists_030(store: ProjectStore, sample_project: Project) -> None:
+    """升版后的项目 save 时持久化 0.3。"""
     sample_project.schema_version = "0.1"
     store.create(sample_project)
     loaded = store.load("proj_001")
-    assert loaded.schema_version == "0.2"
+    assert loaded.schema_version == "0.3"
     store.save(loaded, message="升版")
-    assert '"0.2"' in store.json_path("proj_001").read_text(encoding="utf-8")
+    assert '"0.3"' in store.json_path("proj_001").read_text(encoding="utf-8")

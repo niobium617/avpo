@@ -23,7 +23,9 @@ from rich.tree import Tree
 from app.core.cost import DEFAULT_BUDGET, summarize
 from app.core.env import DEFAULT_DATA_DIR, PROJECT_ROOT, load_project_env as _load_env, resolve_data_dir
 from app.core.errors import describe_list
-from app.core.pipeline import run_confirm, run_direct, run_export, run_gen_assets, run_timeline
+from app.core.pipeline import (
+    run_animate, run_confirm, run_direct, run_export, run_gen_assets, run_timeline,
+)
 from app.core.project import ProjectStore
 from app.core.providers import config_for_provider, make_director, make_image
 from app.core.schema import Project
@@ -183,6 +185,22 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             console.print(f"[red]timeline 失败[/red] {describe_list(project.errors)}")
             raise typer.Exit(code=1)
 
+    @app.command()
+    def animate(
+        project_id: str = typer.Argument(..., help="项目 ID"),
+    ) -> None:
+        """animate 节点（M7）：运镜/首尾帧 → 关键帧运镜计划（scene.motion_plan）。"""
+        store.init_repo()
+        project = _load_project_or_exit(store, project_id)
+
+        if run_animate(store, project):
+            console.print(
+                f"[green]animate 完成[/green] {len(project.scenes)} 场景运镜计划解析"
+            )
+        else:
+            console.print(f"[red]animate 失败[/red] {describe_list(project.errors)}")
+            raise typer.Exit(code=1)
+
     @app.command("export")
     def export_cmd(
         project_id: str = typer.Argument(..., help="项目 ID"),
@@ -206,7 +224,7 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             False, "--yes", "-y", help="跳过人工确认（自动/重跑模式，默认建议人工审查）",
         ),
     ) -> None:
-        """一键流水线：direct → confirm → gen_assets → timeline → export。
+        """一键流水线：direct → confirm → gen_assets → animate → timeline → export。
 
         已 done 的节点自动跳过（断点续跑）；失败的节点重试。
         M6 人审优先：confirm 节点展示分镜后等 y/n，n 则退出（改文案重跑 direct，
@@ -258,7 +276,13 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
                 _fail("gen_assets")
             times.append(f"gen_assets {time.time() - t0:.1f}s")
 
-        # 4) timeline → 5) export
+        # 4) animate：运镜/首尾帧 → 关键帧计划（本地解析，旧项目首次 run 自动补跑）
+        t0 = time.time()
+        if not run_animate(store, project):
+            _fail("animate")
+        times.append(f"animate {time.time() - t0:.1f}s")
+
+        # 5) timeline → 6) export
         t0 = time.time()
         if not run_timeline(store, project):
             _fail("timeline")

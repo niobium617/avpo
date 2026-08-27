@@ -18,7 +18,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.core.schema import Project
+from app.core.schema import PIPELINE_NODES, Project
 
 TMP_SUFFIX = ".tmp"
 
@@ -103,15 +103,19 @@ class ProjectStore:
     def load(self, project_id: str) -> Project:
         """读取并校验 project.json；不存在/损坏都会报错，不做静默兜底。
 
-        M6-7.1 升版 shim：schema 0.1 → 0.2 为纯增量字段（默认值即可加载），
-        读取后仅把版本号在内存中升到 0.2，下次 save 时持久化 —— 文件内容不迁移。
+        升版 shim（纯增量，读取后仅内存升级，下次 save 时持久化 —— 文件不迁移）：
+        - M6-7.1：schema 0.1 → 0.2（新字段默认值即可加载）；
+        - M7-8.3：schema 0.2 → 0.3 + 旧项目 pipeline dict 补新节点键（animate），
+          并按 PIPELINE_NODES 顺序重建 —— 老 JSON 的 pipeline 只有 5 个键，
+          缺 animate 会让 run_task 取键炸 KeyError。
         """
         path = self.json_path(project_id)
         if not path.is_file():
             raise FileNotFoundError(f"项目不存在: {project_id}（{path}）")
         project = Project.model_validate_json(path.read_text(encoding="utf-8"))
-        if project.schema_version == "0.1":
-            project.schema_version = "0.2"
+        if project.schema_version in ("0.1", "0.2"):
+            project.schema_version = "0.3"
+        project.pipeline = {node: project.pipeline.get(node, "pending") for node in PIPELINE_NODES}
         return project
 
     def list_project_ids(self) -> list[str]:
