@@ -76,6 +76,7 @@ def _mock_pipeline(monkeypatch) -> list[str]:
 
     monkeypatch.setattr("app.core.pipeline.run_direct", rec("direct"))
     monkeypatch.setattr("app.core.pipeline.run_gen_assets", rec("gen_assets"))
+    monkeypatch.setattr("app.core.pipeline.run_animate", rec("animate"))
     monkeypatch.setattr("app.core.pipeline.run_timeline", rec("timeline"))
     monkeypatch.setattr("app.core.pipeline.run_export", rec("export"))
     monkeypatch.setattr("app.core.providers.make_director", lambda config: object())
@@ -167,7 +168,7 @@ def test_run_all_calls_nodes_in_order(at: AppTest, monkeypatch) -> None:
     at.run()                                                    # fragment 消费任务 + 刷新
 
     assert not at.exception
-    assert calls == ["gen_assets", "timeline", "export"]
+    assert calls == ["gen_assets", "animate", "timeline", "export"]
     # 全链路后 pipeline 全 done（节点 mock 落盘 + rerun 后徽章状态）
     loaded = _store().load("proj_ui")
     assert all(v == "done" for v in loaded.pipeline.values())
@@ -652,6 +653,34 @@ def test_candidate_gallery_and_select(at: AppTest) -> None:
     assert loaded.pipeline["gen_assets"] == "done"              # 素材不重跑
 
 
+def test_candidate_gallery_end_frame_toggle(at: AppTest) -> None:
+    """M7 结束帧：候选画廊「设为结束帧」→ animate 起重跑；已设者显示「取消结束帧」。"""
+    _mk_candidate_project()
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    for v in ("v1", "v2", "v3"):                                 # 初始全部可设结束帧
+        assert at.button(key=f"setendf_proj_ui_s1_img_s1_{v}")
+    assert _has_button(at, "clearendf_proj_ui_s1_img_s1_v2") is False
+
+    at.button(key="setendf_proj_ui_s1_img_s1_v2").click()
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.scenes[0].end_image_asset_id == "img_s1_v2"
+    assert loaded.pipeline["animate"] == "pending"               # 计划重解析
+    assert loaded.pipeline["timeline"] == "pending"
+    assert loaded.pipeline["gen_assets"] == "done"               # 素材不重跑
+    assert any("结束帧" in c.value for c in at.caption)
+
+    at.button(key="clearendf_proj_ui_s1_img_s1_v2").click()
+    at.run()
+
+    assert not at.exception
+    assert _store().load("proj_ui").scenes[0].end_image_asset_id is None
+
+
 def test_reroll_dispatches_to_worker(at: AppTest, monkeypatch) -> None:
     """重新生成候选 → 后台任务分发 edits.reroll_scene_candidates(scene_id)。"""
     calls: list[str] = []
@@ -741,7 +770,7 @@ def test_run_all_moved_into_advanced_expander(at: AppTest, monkeypatch) -> None:
     at.run()
 
     assert not at.exception
-    assert calls == ["gen_assets", "timeline", "export"]
+    assert calls == ["gen_assets", "animate", "timeline", "export"]
     assert _ss(at, "task") is None
 
 
