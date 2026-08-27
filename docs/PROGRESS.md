@@ -2,51 +2,42 @@
 
 > 动态进度跟踪。方案见 `EXECUTION_PLAN.md`，任务拆解见 `IMPLEMENTATION_PLAN.md`。
 
-## 当前状态（2026-08-26）
+## 当前状态（2026-08-27）
 
-**M6 以创作者为中心 —— 7.1~7.10 全部完成**（253 测试全绿 + 2 live 跳过）
+**M7 动态化 —— 8.1~8.10 全部完成**（276 测试全绿 + 2 live 跳过）
 
 | 任务 | 产出 | 状态 |
 |---|---|---|
-| 7.1 schema 0.2 | Brief（12 字段）/Scene 新字段（景别·规划时长·sfx·候选·首尾帧预埋）/ReferenceImage 图组/校验扩展/load 0.1→0.2 内存升版 | ✅ |
-| 7.2 风格模板提示词模块 | prompt_prefix/prompt_lighting/quality_suffix/shot_size_hint + compose_image_prompt 确定性拼装（brief 光影覆盖模板） | ✅ |
-| 7.3 Director 简报感知 | brief/节奏/景别注入 + rewrite_scene 单镜重写（narration 默认不动/重试×2） | ✅ |
-| 7.4 vision 种子缓存 + 参考图注入 | seed 缓存键（候选互不串键）+ reference_png + 渠道能力标志（**live 验证** wanx2.1-imageedit 图生图；flux 降级） | ✅ |
-| 7.5 候选图生成 | 每镜 N 张 img_<sid>_v1..vN（种子复用断点 0 重复调用/孤儿清理/默认选 v1）+ builder 用选中图 | ✅ |
-| 7.6 edits.py 编辑 API | update_scenes 放开文案/update_brief/select_image_candidate/参考图增删/BGM 早期上传/reroll/refine/rewrite，全部落盘+按需失效下游（`_invalidate_from` 含 node 自身） | ✅ |
-| 7.7 Web 策划页 | Brief 全字段表单 + 参考图上传（angle/role/缩略图/删除）+ BGM 上传 + 渠道能力自适应提示，侧边栏五页按创作流排序 | ✅ |
-| 7.8 分镜确认页改版 | 文案可编辑/景别·规划时长·sfx/增删排序/每镜 AI 重写/候选画廊（选中✓·改选·reroll·refine 按能力显隐）+ tasks.py scene_id 参数 ad-hoc 分发（不走 run_task 无自动重试）+ 进度 fragment 挂 main 跨页可见 | ✅ |
-| 7.9 默认人审叙事 | 一键全链路降级为「自动模式（高级）」expander + 分镜页流程提示 + CLI --yes 措辞 + storyboard 打印扩展 | ✅ |
-| 7.10 文档收尾 | README M6 章（六阶段映射/渠道能力表/N=3 成本/迁移说明）+ 里程碑表 + 本文件 + versions.md schema 0.2 | ✅ |
+| 8.1 schema 0.3 | MotionPlan（缩放/横移关键帧 + 尾拍时长）+ Scene.motion_plan + VideoClip.scene_id + PIPELINE_NODES 增 `animate`（direct→confirm→gen_assets→**animate**→timeline→export）+ 校验扩展（clip.scene_id 引用存在） | ✅ |
+| 8.2 运镜解析唯一入口 | `app/core/motion.py`：ZOOM_SCALE 1.15 / PAN_EXTENT 0.12 / END_FRAME_MS 400 + resolve_motion_plan（四种运镜全关键帧化，none 空计划） | ✅ |
+| 8.3 load shim | ProjectStore.load：旧 5 节点 pipeline 按序补 `animate: pending`（dict 顺序规范化）+ 0.1/0.2 → 0.3 内存升版，文件不迁移 | ✅ |
+| 8.4 animate 节点 | run_animate（前置 gen_assets done；逐镜 resolve_motion_plan 落盘；进度事件；下游失效）+ CLI `avpo run` 插入 + 独立 `avpo animate` 命令 + web 单节点/全链路接入 | ✅ |
+| 8.5 首尾帧尾拍 | build_timeline：motion_plan.end_frame_ms > 0 → 配音后追加静态尾拍 clip（motion=none，硬切）；下一场景 start_ms 顺延；尾拍资产/文件缺失 FatalError | ✅ |
+| 8.6 剪映导出关键帧运镜 | 删入场动画映射（_MOTION_ANIMATION/IntroType）→ add_keyframe（uniform_scale/position_x 线性插值）全运镜覆盖（**M2 的 pan 降级限制解除**）；旧项目兜底（无 motion_plan 按 motion 解析 + clip 无 scene_id 按图资产前缀找回场景）；尾拍段不套计划 | ✅ |
+| 8.7 首尾帧编辑 API | edits.select_end_frame/clear_end_frame（候选图选结束帧，0 额外生图成本；animate 起重跑） | ✅ |
+| 8.8 分镜页结束帧按钮 | 候选画廊每张候选「设为结束帧/取消结束帧」+「◼ 结束帧」徽章 + 尾拍说明 caption | ✅ |
+| 8.9 测试 | `tests/test_m7_animate.py` 18 条（motion 五类参数化/end_frame/animate 落盘与失效/前置依赖/done 跳过/进度事件/shim 插键/timeline 尾拍与旧行为/导出关键帧与尾拍/旧数据兜底/edits）+ schema 2 新 + web 1 新 + 全套回归 | ✅ **276 全绿** |
+| 8.10 文档 | README M7 章 + 里程碑表 + 本文件 + versions.md schema 0.3 | ✅ |
 
-要点（M6）：
-- **编辑失效语义**：`edits._invalidate_from(project, node)` 含 node 自身（update_brief/
-  候选改选/参考图增删/reroll/refine —— 编辑作废了 node 的产物）；`pipeline._invalidate_downstream`
-  仅 node 之后（update_scenes/rewrite_scene —— direct 产物已含人改保持 done，confirm 起重跑）。
-  候选改选只失效 timeline+export，gen_assets 素材不重跑。
-- **候选图种子语义**：生成时总传显式 seed（已有 seed 复用=断点续跑 0 重复调用，或新
-  random.randint），seed 进缓存键（同 prompt 的 v1/v2 不串键）；`cache.put(record_seed=...)`
-  让 seedless 调用者写 seedless 键但 sidecar 记实际 seed。精修 refine 用「选中图作参考 +
-  同种子」确定性重绘，新资产附 reference_asset_id。
-- **渠道能力降级**：`ImageProvider.supports_reference_image` 类属性 + `providers.image_capabilities`
-  无 key 内省；siliconflow 无 img2img → 策划页提示降级 + 精修按钮隐藏 + refine 抛 ValueError；
-  qwen 走 wanx2.1-imageedit（live 已验证）。
-- **ad-hoc 任务**（reroll/refine/rewrite）：`tasks.start_task(scene_id=...)` 分发到
-  `edits.*`（不走 run_task：无 done 跳过/自动重试，人类触发单次，失败直接报错）；
-  进度/结果 fragment 挂在 main()，全页可见可消费。
-- **参考图 id**：`Project.reference_seq` 计数器持久在 project.json，单调递增删除不复用。
-- **测试**：253 = 222（7.4 前）+ 31（7.5/7.6 迁移与新增）+ 5（7.7）+ 9（7.8）+ 2（7.9）；
-  AppTest 断言按钮/字幕按 key（st.image 不做断言）；file_uploader 无法在 AppTest 设置
-  → 上传逻辑在 core 层（edits.py），web 测试只断 widget 存在；`at.button(key=缺失)` 抛
-  KeyError（`_has_button` 辅助判断按钮显隐）。
+要点（M7）：
+- **运镜全关键帧化**：zoom_in_slow = uniform_scale 1.0→1.15；zoom_out 反向；pan_left =
+  position_x -0.12→+0.12（镜头左摇，内容右滑）恒 1.15 缩放防露边；pan_right 反向。
+  pyJianYingDraft 的 uniform_scale 关键帧导出为 KFTypeScaleX + 段级 uniform_scale 标志。
+  参数集中在 `app/core/motion.py` 一处 —— animate 节点落盘、导出兜底同源，可审计可调。
+- **首尾帧 = 候选图选结束帧**：不额外生图（0 API 成本），animate 解析出 end_frame_ms=400，
+  时间线在配音后追加静态尾拍（硬切 —— 转场刻意留给 M9 的 `VideoClip.transition`）。
+- **失效语义扩展**：编辑结束帧走 `_invalidate_from("animate")`（计划要重解析，timeline/export
+  随之 pending）；animate 成功后 `_invalidate_downstream("animate")` 重置 timeline/export。
+- **旧项目兼容**：0.2 数据加载即插 animate 键（下次 save 持久化）；不跑 animate 时导出按
+  scene.motion 兜底 + clip 无 scene_id 按 `img_<sid>_` 前缀找回场景 —— 老草稿运镜不丢。
+- **测试**：276 = 253（M6）+ 18（m7_animate）+ 2（schema 0.3）+ 1（web 结束帧）+ 2（store 升版改写）；
+  mp3 测试帧长必须与头声明一致（417B/帧），mutagen 严格按帧长同步。
 
 ### 下一步
 
-- **M7 动态化**：`Scene.end_image_asset_id`（首尾帧）已预埋；PIPELINE_NODES 增 `animate`
-  节点 + 旧项目 pipeline 键插入 shim；分镜运镜指令入剪映草稿。
 - **M8 音频**：`Scene.sfx` → `assets/sfx/` 引用；`bgm_hint` 卡点剪辑（BGM 早期上传已交付）。
-- **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧（未来 `VideoClip.transition` 字段，刻意不进 0.2）。
-- 题材模板积累（templates/）；多任务并行/进度条跨页已随 7.8 部分解决（fragment 挂 main）。
+- **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧（`VideoClip.transition` 字段，M7 尾拍硬切先占位）。
+- 题材模板积累（templates/）；多任务并行（当前单会话单任务）。
 
 ---
 
@@ -162,11 +153,10 @@ st.progress；按钮防双开；save 线程锁。）
 错误提示（test_errors ✅）全部验证；MVP 可交付使用。
 → ✅ **已达成**（2026-08-22）。**M3 正式关闭。**
 
-## 路线图（2026-08-26 更新）
+## 路线图（2026-08-27 更新）
 
-- **M7 动态化**：首尾帧（`Scene.end_image_asset_id` 已预埋）+ 运镜指令入剪映草稿；
-- **M8 音频**：`Scene.sfx` → `assets/sfx/` 引用 + `bgm_hint` 卡点剪辑；
-- **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧；
+- **M8 音频**：`Scene.sfx` → `assets/sfx/` 引用 + `bgm_hint` 卡点剪辑（BGM 早期上传已随 M6 交付）；
+- **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧（`VideoClip.transition` 字段，M7 尾拍硬切先占位）；
 - 候选池：Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
 - 工作台多任务并行（当前单会话单任务）；进度条跨页已随 M6-7.8 解决（fragment 挂 main）。
 

@@ -3,7 +3,7 @@
 > 连接剧本、AI 生成模型与剪映的智能中间层，消除工具间搬运与对齐。
 > 以创作者为中心：AI 是协作者/提案者，简化的是工具流程，创作决策权始终在人。
 
-**当前状态：M0~M6 全部完成（MVP 可交付 + 工作台五页 + 创作者中心：策划/候选图/默认人审，253 测试绿）**
+**当前状态：M0~M7 全部完成（MVP 可交付 + 工作台五页 + 创作者中心 + 运镜动态化，276 测试绿）**
 
 ## MVP 工作流（营销口播视频）
 
@@ -17,8 +17,11 @@
 素材自动归档 → project.json 更新（状态与产物同一次 git 提交 = 断点续跑基础）
    │ 字幕 = TTS 时间戳聚合，零成本对齐
    ▼
+运镜解析（M7：分镜运镜/首尾帧 → 关键帧计划，`animate` 节点）
+   │ 结束帧从候选图选（0 额外生图）→ 配音后静态尾拍 0.4s
+   ▼
 时间线组装（场景时长 = 配音实际时长，mutagen 读取）
-   │ pyJianYingDraft 生成明文草稿（字幕样式按风格模板 + 可选 BGM）
+   │ pyJianYingDraft 生成明文草稿（关键帧运镜 + 字幕样式按风格模板 + 可选 BGM）
    ▼
 剪映草稿目录/zip → 剪映打开精修 → 成片
 ```
@@ -53,8 +56,8 @@ avpo web                                               # http://localhost:8501
 | 命令 | 说明 |
 |---|---|
 | `avpo new <pid> [--style 模板] [--provider 渠道]` | 建项目；风格模板 default/fast_talk/emotional/explainer |
-| `avpo run <pid> --text "..." [--yes]` | 一键流水线：direct→confirm→gen_assets→timeline→export（`--yes` 跳过人工确认，仅建议自动/重跑） |
-| `avpo direct <pid> --text "..."` / `gen-assets` / `timeline` / `export` | 单节点执行（已 done 节点自动跳过 = 断点续跑） |
+| `avpo run <pid> --text "..." [--yes]` | 一键流水线：direct→confirm→gen_assets→**animate**→timeline→export（`--yes` 跳过人工确认，仅建议自动/重跑） |
+| `avpo direct <pid> --text "..."` / `gen-assets` / `animate` / `timeline` / `export` | 单节点执行（已 done 节点自动跳过 = 断点续跑） |
 | `avpo status <pid>` | 打印状态树：节点状态、场景、素材、成本 |
 | `avpo cost <pid> [--budget 5]` | 成本汇总（LLM + 生图，纯 SUM 不二次对账），超预算告警 |
 | `avpo new --provider siliconflow` | 换渠道（siliconflow FLUX / dashscope 通义万相） |
@@ -80,7 +83,7 @@ M6 落地六阶段创作流程（策划 → 画面生产 → 动态 → 音频 �
 |---|---|---|
 | 一、前期策划 | Brief 简报 + 参考图组 + BGM 节奏前置 | M6 ✅ |
 | 二、画面生产 | 每镜 N 张候选图 + 人审改选 + 图生图精修 | M6 ✅ |
-| 三、动态 | 首尾帧框定运动轨迹（`Scene.end_image_asset_id` 已预埋）+ 运镜指令入剪映草稿 | M7 |
+| 三、动态 | 运镜关键帧（animate 节点）+ 首尾帧静态尾拍（候选图选结束帧） | M7 ✅ |
 | 四、音频 | sfx 素材引用 + BGM 卡点对齐（`bgm_hint` 已前置） | M8 |
 | 五、剪辑 | 时间线组装（已完成）+ 卡点编辑增强 | M8 |
 | 六、优化导出 | 止损转场（0.3s 闪白/震动覆盖不可修帧） | M9 |
@@ -124,6 +127,25 @@ M6 落地六阶段创作流程（策划 → 画面生产 → 动态 → 音频 �
 - 生图缓存键升级为 seed 级：旧 seedless 缓存仍可读，但候选流不再命中 → 升级后
   首次重跑全量重生成（一次性成本），之后断点续跑 0 重复调用语义不变。
 
+## 动态化（M7）
+
+六节点流水线中间插入 `animate`：把分镜运镜提案与首尾帧解析为**关键帧计划**
+（`MotionPlan`），时间线组装与剪映导出都以该计划为唯一参数源。
+
+- **运镜全关键帧化**：zoom_in_slow（1.0→1.15）/ zoom_out（1.15→1.0）/ pan_left /
+  pan_right（position_x ±0.12，恒 1.15 缩放防露边）全部用剪映关键帧线性插值实现
+  （pyJianYingDraft `KeyframeProperty.uniform_scale / position_x`）—— M2 时代
+  `pan_*` 因无入场动画枚举而降级为静态，M7 解除该限制。
+- **首尾帧 = 候选图选结束帧**：分镜确认页候选画廊每张候选可「设为结束帧」（edits
+  API，0 额外生图成本）；animate 解析出 0.4s 尾拍（`END_FRAME_MS`），时间线在配音
+  后追加静态尾拍，全片时长含尾拍（BGM 对齐依据）；尾拍硬切，转场留给 M9。
+- **单点可调**：缩放/横移幅度、尾拍时长全部集中在 `app/core/motion.py`；animate
+  落盘计划、导出兜底解析同源，改参数即全线生效。
+- **失效语义**：改结束帧只重跑 animate 及下游（素材不重跑）；animate 成功后重置
+  timeline/export。
+- **旧项目兼容**：0.2 数据加载即按序补 `animate: pending` 键（内存升版 0.3，文件
+  不迁移）；没跑 animate 的旧项目导出时按 `scene.motion` 兜底解析，老草稿运镜不丢。
+
 ## 成本
 
 - 记账：每次 API 调用成功即写 cost 到场景/资产（LLM 分镜成本均摊到场景，生图记
@@ -150,7 +172,7 @@ M6 落地六阶段创作流程（策划 → 画面生产 → 动态 → 音频 �
 | 项目管理 | 项目卡片列表（进度/成本）+ 新建项目（标题/风格模板/渠道/音色） |
 | 策划 | Brief 创作简报 + 参考图组（角度/角色标签、渠道能力提示）+ BGM 早期上传 |
 | 分镜确认 | 创作者枢纽：文案/景别/规划时长/音效编辑、增删排序、每镜 AI 重写、候选画廊（选中/重 roll/精修）、确认 |
-| 流水线 | 5 节点状态徽章 + 单节点运行 + 「自动模式（高级）」一键全链路 + 错误记录 + 草稿 zip 下载 |
+| 流水线 | 6 节点状态徽章 + 单节点运行 + 「自动模式（高级）」一键全链路 + 错误记录 + 草稿 zip 下载 |
 | 成本面板 | 总成本/预算 metric + 按场景/资产明细 + 超预算告警 |
 
 M5 后台任务模型：
@@ -191,8 +213,11 @@ M6 编辑语义（`app/core/edits.py`）：策划保存/分镜修改/候选改�
 │ director/  文案→分镜（LLM 强制 JSON）    │
 │ tts/       edge-tts 配音 + 字幕 + 缓存   │
 │ vision/    生图（多渠道）+ prompt_hash   │
-│ timeline/  全局时间轴（mutagen 实长）    │
-│ export/    剪映草稿（pyJianYingDraft）   │
+│ core/motion.py  运镜解析唯一入口（M7）   │
+│ timeline/  全局时间轴（mutagen 实长 +    │
+│            首尾帧尾拍）                 │
+│ export/    剪映草稿（pyJianYingDraft +   │
+│            关键帧运镜）                 │
 │ core/      cost 账本 / errors 分类 /     │
 │            styles 模板注册表             │
 └──────────────────────────────────────────┘
@@ -206,12 +231,12 @@ data/projects/<pid>/project.json + assets/ + exports/<pid>_draft/
 ```
 AVPO/
 ├── app/
-│   ├── core/         # schema、store、状态机、pipeline、成本、错误分类、风格模板、进度事件
+│   ├── core/         # schema、store、状态机、pipeline、motion（运镜解析）、成本、错误分类、风格模板、进度事件
 │   ├── director/     # AI 导演助手：文案 → 分镜（LLM 强制 JSON + 逐字校验）
 │   ├── tts/          # edge-tts 配音 + word 时间戳 + sidecar 缓存 → 字幕
 │   ├── vision/       # 生图（dashscope 千问 / siliconflow FLUX）+ seed 级缓存 + 参考图注入
-│   ├── timeline/     # 时间线组装（场景时长 = 配音实际时长）
-│   ├── export/       # 剪映草稿生成（pyJianYingDraft 封装，模板字幕样式 + BGM）
+│   ├── timeline/     # 时间线组装（场景时长 = 配音实际时长 + 首尾帧尾拍）
+│   ├── export/       # 剪映草稿生成（pyJianYingDraft 封装，关键帧运镜 + 模板字幕样式 + BGM）
 │   ├── web/          # Streamlit 工作台（M4：四功能区；M5：后台线程 + 真进度条）
 │   └── cli.py        # avpo 命令入口
 ├── templates/        # 风格模板 JSON（fast_talk / emotional / explainer）
@@ -230,6 +255,7 @@ AVPO/
 | M4 | Streamlit 工作台（阶段 1 第一步）| 四功能区（项目管理/流水线/分镜确认/成本面板）+ avpo web 启动器，171 测试全绿 | ✅ |
 | M5 | 工作台后台线程化 + 真进度条 | 结构化进度事件（五节点）+ worker 线程 + fragment 轮询 st.progress + 按钮防双开 + save 线程锁，183 测试全绿 | ✅ |
 | M6 | 以创作者为中心（策划 + 候选图 + 默认人审）| 策划页（Brief/参考图/BGM）+ 每镜候选画廊（改选/重 roll/精修）+ 分镜编辑器增强 + 编辑 API + 人审优先叙事，253 测试全绿 + wanx2.1-imageedit live 验证 | ✅ |
+| M7 | 动态化（运镜关键帧 + 首尾帧）| animate 节点（六节点流水线）+ 四种运镜全关键帧化（pan 降级解除）+ 候选图选结束帧 → 0.4s 静态尾拍 + 旧项目兼容 shim，276 测试全绿 | ✅ |
 
 完整方案见 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)、[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[SUMMARY.md](SUMMARY.md)、[docs/PROGRESS.md](docs/PROGRESS.md)。
 
@@ -243,9 +269,8 @@ pytest -m live                    # 真实链路（调用外部 API，按 .env �
 
 ## 已知限制
 
-- 运镜：pan_left/pan_right 暂无剪映入场动画枚举，降级为静态（`none`），不影响成片；
-  视频动态化（首尾帧/运镜指令入草稿）为 M7，当前分镜 LLM 的运镜/景别是提案，
-  最终以剪映内动画为准；
+- 运镜：关键帧动画已覆盖 zoom/pan 四类（M7），但分镜 LLM 的运镜/景别仍是提案，
+  最终以剪映内关键帧为准；转场（闪白/震动）为 M9（`VideoClip.transition` 字段预留）；
 - BGM：策划页支持早期上传（`assets/bgm.mp3`），模板不携带素材；节奏卡点剪辑为 M8；
 - 音效（sfx）：当前仅为分镜描述字段（策划记录），素材自备 `assets/sfx/` 的引用接入为 M8；
 - 渠道 key 只放 `.env`，不入库（公开仓库规范）；
