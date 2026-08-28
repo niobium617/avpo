@@ -2,7 +2,47 @@
 
 > 动态进度跟踪。方案见 `EXECUTION_PLAN.md`，任务拆解见 `IMPLEMENTATION_PLAN.md`。
 
-## 当前状态（2026-08-27）
+## 当前状态（2026-08-28）
+
+**M8 音频 —— 8.1~8.9 全部完成**（303 测试全绿 + 2 live 跳过）
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 8.1 schema 0.4 + 依赖 | `Scene.sfx_asset_id`（切点音效引用）+ `Timeline.sfx`（音效轨）+ `ProjectConfig.beat_sync`（卡点开关）+ 引用/类型校验；miniaudio==1.71 + numpy 入 pyproject/requirements（py3.13 wheel 实测解码正常）；load shim 0.1/0.2/0.3 → 0.4 | ✅ |
+| 8.2 节拍检测 | `app/audio/beats.py`：miniaudio 解码（无 ffmpeg）→ mono 帧 RMS 包络 → onset 正差分 → 自适应阈值（mean+1.2σ）+ 最小间距 250ms 峰值检测；纯本地确定性（同文件同输出 → 组装幂等）；解码失败 BeatDetectionError（降级信号） | ✅ |
+| 8.3 edits 扩展 | add_sfx（assets/sfx/ 入库注册 `sfx_<名>`，0 API 成本）/remove_sfx（清场景引用+文件）/select_scene_sfx（绑定/解绑，校验 audio）/set_beat_sync；add_bgm 失效升级为 timeline 起（卡点依赖 BGM） | ✅ |
+| 8.4 timeline 音效轨 + 卡点 | build_timeline：timeline.sfx 组装（切点音效，duration None → 导出取素材自身时长，缺失 FatalError）；beat_sync 且 BGM 存在 → 切点向前 snap 到 [自然点, +400ms] 内最近节拍（只前移不重叠，首场景不动，尾拍后边界同参与）；BGM 缺失/解码失败静默跳过 | ✅ |
+| 8.5 导出 sfx 轨 + BGM 解耦 | `_TRACK_SFX` 独立音轨（切点定位 + 素材自身时长 + 无淡入淡出）；BGM 来源 = 项目上传 assets/bgm.mp3 优先、style.bgm 兜底（default 模板上传后即铺满） | ✅ |
+| 8.6 工作台 UI | 策划页：BGM 卡点 checkbox（即时落盘）+ 节拍数预览（session 按 mtime 缓存）+ 音效库（上传/删除）；分镜页：每场景「切点音效」selectbox 即时绑定 | ✅ |
+| 8.7 CLI status | config 行（style + beat_sync）+ 场景行 sfx 字段 + timeline 行 sfx 段数 | ✅ |
+| 8.8 测试 | `tests/test_m8_audio.py` 25 条（beats 合成 wav/静音/解码失败；edits 六函数；timeline sfx 轨 + 卡点 snap/无近拍/开关关/无 BGM/解码失败/尾拍后边界/幂等；导出 sfx 轨与 BGM 解耦/模板兜底；schema 引用校验）+ web 2 新（卡点开关落盘/sfx 绑定）+ shim/版本断言 5 处改写 | ✅ **303 全绿** |
+| 8.9 文档 | README M8 章 + 阶段映射 M8 行 + 里程碑表 + 已知限制更新 + 架构图/目录结构；本文件；versions.md schema 0.4 + miniaudio 1.71 | ✅ |
+
+要点（M8）：
+- **卡点 = 向前 snap，绝不后移**：配音不能重叠，切点对齐节拍只能「顺延」——切点停顿处
+  只有 BGM（音乐呼吸感）；窗口 ≤0.4s（`SNAP_MAX_MS`，builder.py 单点可调），窗口内无
+  节拍保持自然位置；首场景从 0 起不动；首尾帧尾拍后的边界同样参与对齐。
+- **节拍检测确定性**：同文件同输出是时间线幂等的前提；参数（FRAME_HOP/MIN_GAP_MS/
+  THRESHOLD_K）集中在 beats.py 一处，能量包络法对鼓点/重拍敏感，轻音乐检出少
+  （README 已知限制已注明，试听核对）。
+- **sfx 双轨语义**：`Scene.sfx`（文本，导演提案标注）与 `Scene.sfx_asset_id`（实际素材
+  引用）并存；切点音效独立轨导出，不加淡入淡出（淡入削弱起音打击感）。
+- **失效语义**：BGM 上传/卡点开关/音效增删改绑全部 `_invalidate_from("timeline")` ——
+  卡点与音效轨是时间线组装产物；素材与运镜计划上游不动（gen_assets/animate 保持 done）。
+- **旧项目兼容**：0.1~0.3 直接加载内存升版 0.4（新字段全默认值，无 key 迁移）；
+  beat_sync 默认关 = 旧行为（场景首尾相接）。
+- **测试**：303 = 276（M7）+ 25（m8_audio）+ 2（web）；导出断言注意 sfx 段仍带默认
+  1.0 倍速曲线材质（extra_material_refs 非空），无淡入断言 = refs 中无 audio_fade。
+
+### 下一步
+
+- **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧（`VideoClip.transition` 字段，M7 尾拍硬切先占位）。
+- 候选池：Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
+- 题材模板积累（templates/）；多任务并行（当前单会话单任务）。
+
+---
+
+## M7 动态化（2026-08-27）—— 8.1~8.10 全部完成
 
 **M7 动态化 —— 8.1~8.10 全部完成**（276 测试全绿 + 2 live 跳过）
 
@@ -16,7 +56,7 @@
 | 8.6 剪映导出关键帧运镜 | 删入场动画映射（_MOTION_ANIMATION/IntroType）→ add_keyframe（uniform_scale/position_x 线性插值）全运镜覆盖（**M2 的 pan 降级限制解除**）；旧项目兜底（无 motion_plan 按 motion 解析 + clip 无 scene_id 按图资产前缀找回场景）；尾拍段不套计划 | ✅ |
 | 8.7 首尾帧编辑 API | edits.select_end_frame/clear_end_frame（候选图选结束帧，0 额外生图成本；animate 起重跑） | ✅ |
 | 8.8 分镜页结束帧按钮 | 候选画廊每张候选「设为结束帧/取消结束帧」+「◼ 结束帧」徽章 + 尾拍说明 caption | ✅ |
-| 8.9 测试 | `tests/test_m7_animate.py` 18 条（motion 五类参数化/end_frame/animate 落盘与失效/前置依赖/done 跳过/进度事件/shim 插键/timeline 尾拍与旧行为/导出关键帧与尾拍/旧数据兜底/edits）+ schema 2 新 + web 1 新 + 全套回归 | ✅ **276 全绿** |
+| 8.9 测试 | `tests/test_m7_animate.py` 18 条 + schema 2 新 + web 1 新 + 全套回归 | ✅ **276 全绿** |
 | 8.10 文档 | README M7 章 + 里程碑表 + 本文件 + versions.md schema 0.3 | ✅ |
 
 要点（M7）：
@@ -32,12 +72,6 @@
   scene.motion 兜底 + clip 无 scene_id 按 `img_<sid>_` 前缀找回场景 —— 老草稿运镜不丢。
 - **测试**：276 = 253（M6）+ 18（m7_animate）+ 2（schema 0.3）+ 1（web 结束帧）+ 2（store 升版改写）；
   mp3 测试帧长必须与头声明一致（417B/帧），mutagen 严格按帧长同步。
-
-### 下一步
-
-- **M8 音频**：`Scene.sfx` → `assets/sfx/` 引用；`bgm_hint` 卡点剪辑（BGM 早期上传已交付）。
-- **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧（`VideoClip.transition` 字段，M7 尾拍硬切先占位）。
-- 题材模板积累（templates/）；多任务并行（当前单会话单任务）。
 
 ---
 
@@ -153,12 +187,11 @@ st.progress；按钮防双开；save 线程锁。）
 错误提示（test_errors ✅）全部验证；MVP 可交付使用。
 → ✅ **已达成**（2026-08-22）。**M3 正式关闭。**
 
-## 路线图（2026-08-27 更新）
+## 路线图（2026-08-28 更新）
 
-- **M8 音频**：`Scene.sfx` → `assets/sfx/` 引用 + `bgm_hint` 卡点剪辑（BGM 早期上传已随 M6 交付）；
 - **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧（`VideoClip.transition` 字段，M7 尾拍硬切先占位）；
 - 候选池：Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
-- 工作台多任务并行（当前单会话单任务）；进度条跨页已随 M6-7.8 解决（fragment 挂 main）。
+- 题材模板积累（templates/）；工作台多任务并行（当前单会话单任务）。
 
 ## 钉版记录
 

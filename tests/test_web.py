@@ -814,3 +814,51 @@ def test_corrupt_project_json_shows_inline_error(at: AppTest) -> None:
     at.run()
     assert not at.exception
     assert any("bad_proj" in e.value for e in at.error)
+
+
+# ---------------------------------------------------------------- 页面 2/3：M8 音频
+
+def test_brief_page_sfx_library_and_beat_sync_widgets(at: AppTest) -> None:
+    """策划页（M8）：音效上传器 + BGM 卡点开关存在，开关即时落盘。"""
+    _mk_project()
+    at.run()
+    _goto(at, "策划", pid="proj_ui")
+
+    assert not at.exception
+    assert at.file_uploader(key="sfxup_proj_ui")
+    assert at.checkbox(key="beatsync_proj_ui")
+
+    at.checkbox(key="beatsync_proj_ui").check()
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.config.beat_sync is True
+    assert loaded.pipeline["timeline"] == "pending"              # 卡点影响时间线组装
+
+
+def test_storyboard_sfx_selectbox_binds_scene(at: AppTest, tmp_path) -> None:
+    """分镜页（M8）：切点音效 selectbox 存在，选择即绑定落盘（timeline 起重跑）。"""
+    _mk_project(scenes=SCENES)
+    store = _store()
+    project = store.load("proj_ui")
+    src = tmp_path / "whoosh.mp3"
+    src.write_bytes(b"mp3-body")
+    edits.add_sfx(store, project, src)
+    project.pipeline = {n: "done" for n in project.pipeline}     # 观察 timeline 被重置
+    store.save(project, message="web 测试补 done")
+
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    assert not at.exception
+    sfx_sel = at.selectbox(key="sfxsel_proj_ui_s1")
+    assert sfx_sel is not None
+
+    sfx_sel.set_value("sfx_whoosh")
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.scenes[0].sfx_asset_id == "sfx_whoosh"
+    assert loaded.pipeline["timeline"] == "pending"

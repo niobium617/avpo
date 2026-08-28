@@ -107,14 +107,16 @@ class ProjectStore:
         - M6-7.1：schema 0.1 → 0.2（新字段默认值即可加载）；
         - M7-8.3：schema 0.2 → 0.3 + 旧项目 pipeline dict 补新节点键（animate），
           并按 PIPELINE_NODES 顺序重建 —— 老 JSON 的 pipeline 只有 5 个键，
-          缺 animate 会让 run_task 取键炸 KeyError。
+          缺 animate 会让 run_task 取键炸 KeyError；
+        - M8：schema 0.3 → 0.4（sfx_asset_id/timeline.sfx/beat_sync 均为
+          默认值字段，pydantic 直接填充，无需补键）。
         """
         path = self.json_path(project_id)
         if not path.is_file():
             raise FileNotFoundError(f"项目不存在: {project_id}（{path}）")
         project = Project.model_validate_json(path.read_text(encoding="utf-8"))
-        if project.schema_version in ("0.1", "0.2"):
-            project.schema_version = "0.3"
+        if project.schema_version in ("0.1", "0.2", "0.3"):
+            project.schema_version = "0.4"
         project.pipeline = {node: project.pipeline.get(node, "pending") for node in PIPELINE_NODES}
         return project
 

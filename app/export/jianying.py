@@ -11,6 +11,9 @@
   （motion=none 的 clip）按通用视频轨导出，不加任何动画（转场属 M9）。
 - M2-3.2 扩展：字幕样式（字号/居中/描边/低位）、配音段淡入淡出、草稿元信息
   （draft_name/tm_duration）。封面由剪映取首帧自动生成 —— 首段从 0 起即首图。
+- M8 音频：sfx 音效轨（timeline.sfx，切点音效短促不加淡入淡出）+ BGM 来源解耦
+  （项目上传 assets/bgm.mp3 优先，模板 style.bgm 兜底 —— 无模板 BGM 的项目
+  上传后即铺满全片）。
 """
 
 import json
@@ -35,12 +38,15 @@ from pyJianYingDraft import (  # noqa: N999 —— 包名本身大写
 from app.core.motion import resolve_motion_plan
 from app.core.schema import MotionPlan, Project
 from app.core.styles import load_style
+from app.timeline.builder import BGM_FILENAME
 
-# 草稿内的固定轨道名（MVP 固定三轨，见 EXECUTION_PLAN §1-决策5；BGM 为 M3-4.4 可选第 4 轨）
+# 草稿内的固定轨道名（MVP 固定三轨，见 EXECUTION_PLAN §1-决策5；BGM 为 M3-4.4 可选第 4 轨，
+# sfx 为 M8 第 5 轨）
 _TRACK_VIDEO = "v1"
 _TRACK_AUDIO = "a1"
 _TRACK_TEXT = "sub"
 _TRACK_BGM = "bgm"
+_TRACK_SFX = "sfx"
 _MATERIALS_DIR = "materials"
 
 # 配音段淡入淡出：每段 300ms，衔接处不突兀、首段渐入末段渐出
@@ -89,17 +95,21 @@ def export(
             raise FileNotFoundError(f"素材缺失: {asset_id} -> {src}")
         draft_paths[asset_id] = _copy_to_materials(src, materials_dir)
 
-    # BGM：模板配置了路径且文件存在才加轨（缺失降级跳过，不阻塞导出）
+    # BGM（M8 来源解耦）：项目上传的 assets/bgm.mp3 优先（策划页上传），模板
+    # style.bgm 兜底（老约定）；文件缺失降级跳过，不阻塞导出。
     bgm_draft_path: Path | None = None
-    if style.bgm:
+    bgm_src = project_root / "assets" / BGM_FILENAME
+    if not bgm_src.is_file() and style.bgm:
         bgm_src = project_root / style.bgm
-        if bgm_src.is_file():
-            bgm_draft_path = _copy_to_materials(bgm_src, materials_dir)
+    if bgm_src.is_file():
+        bgm_draft_path = _copy_to_materials(bgm_src, materials_dir)
 
     draft.append_track(TrackSpec(TrackType.video, _TRACK_VIDEO))
     draft.append_track(TrackSpec(TrackType.audio, _TRACK_AUDIO))
     if bgm_draft_path:
         draft.append_track(TrackSpec(TrackType.audio, _TRACK_BGM))
+    if project.timeline.sfx:
+        draft.append_track(TrackSpec(TrackType.audio, _TRACK_SFX))
 
     # 视频轨：图片/视频素材 + M7 关键帧运镜（参数取自场景运镜计划）
     scene_map = {s.scene_id: s for s in project.scenes}
@@ -151,6 +161,19 @@ def export(
         bgm_segment = AudioSegment(str(bgm_draft_path), trange(0, duration_us))
         bgm_segment.add_fade(0, _BGM_FADE_OUT_MS * 1000)
         draft.add_segment(bgm_segment, _TRACK_BGM)
+
+    # 音效轨（M8）：切点音效按素材自身时长整段播放（AudioClip.duration_ms 组装时
+    # 留 None），短促音效不淡入淡出（淡入会削弱起音打击感）。
+    for clip in project.timeline.sfx:
+        asset = project.assets[clip.asset_id]
+        if asset.type != "audio":
+            raise ValueError(f"音效轨素材类型不符: {clip.asset_id} 是 {asset.type}")
+        material = AudioMaterial(str(draft_paths[clip.asset_id]))
+        segment = AudioSegment(
+            str(draft_paths[clip.asset_id]),
+            trange(clip.offset_ms * 1000, material.duration),
+        )
+        draft.add_segment(segment, _TRACK_SFX)
 
     # 字幕轨：逐条文本段，样式按风格模板（M2-3.2 固定样式 = default 模板）。字幕存的是
     # 场景内相对时间戳（M1 产物，各场景从 0 开始），导出时按 scene.start_ms 平移到全局时间轴。

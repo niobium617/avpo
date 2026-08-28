@@ -23,6 +23,7 @@
 import streamlit as st
 from pathlib import Path
 
+from app.audio import beats
 from app.core import edits, env, errors, pipeline, providers, styles
 from app.web import tasks
 from app.core.cost import DEFAULT_BUDGET, summarize
@@ -155,12 +156,33 @@ def _brief_widget(field: str, label: str, value: str, pid: str):
     return st.text_input(label, value=value, key=key)
 
 
+def _bgm_beat_count(store: ProjectStore, pid: str) -> int | None:
+    """已上传 BGM 的节拍数（按文件 mtime 缓存于 session —— 每次页面重渲染不重复解码）。
+
+    返回 None = 解码失败（调用方展示降级文案）。
+    """
+    bgm_path = store.project_dir(pid) / "assets" / "bgm.mp3"
+    if not bgm_path.is_file():
+        return None
+    mtime = bgm_path.stat().st_mtime_ns
+    key = f"bgm_beats_{pid}"
+    cached = st.session_state.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        n: int | None = len(beats.detect_beats(bgm_path))
+    except ValueError:
+        n = None
+    st.session_state[key] = (mtime, n)
+    return n
+
+
 def _render_brief(store: ProjectStore, project: Project) -> None:
-    """页面 2：策划 —— 创作简报（Brief）+ 参考图组 + BGM 早期上传（M6-7.7）。
+    """页面 2：策划 —— 创作简报（Brief）+ 参考图组 + BGM 卡点/音效库（M6-7.7 + M8）。
 
     阶段一定位：brief 是创作者的「不变量」输入，AI 按简报提案分镜与画面；
     保存后 direct 起全下游重置待运行（update_brief 失效语义）。
-    参考图/BGM 上传为同步编辑：落盘 + 按需失效下游，不走后台任务。
+    参考图/BGM/音效上传为同步编辑：落盘 + 按需失效下游，不走后台任务。
     渠道能力提示（image_capabilities）让 UI 按渠道自适应，不实例化渠道。
     """
     st.header("策划")
@@ -256,10 +278,15 @@ def _render_brief(store: ProjectStore, project: Project) -> None:
             tmp.unlink(missing_ok=True)
 
     st.divider()
-    st.subheader("BGM（早期上传）")
-    st.caption("BGM 拷贝到 assets/bgm.mp3（导出节点约定路径，emotional 模板即用此约定）；完整 BGM 选择/卡点剪辑 M8。")
+    st.subheader("BGM 与卡点（M8 音频）")
+    st.caption("BGM 拷贝到 assets/bgm.mp3：导出时铺满全片；开启卡点对齐后，时间线组装把场景切换点对齐到节拍。")
     if (store.project_dir(pid) / "assets" / "bgm.mp3").is_file():
         st.caption("已上传 BGM")
+        n_beats = _bgm_beat_count(store, pid)
+        if n_beats is None:
+            st.caption("BGM 无法解析节拍（可能不是有效音频，卡点将跳过）")
+        else:
+            st.caption(f"检测到 {n_beats} 个节拍（卡点开启时切换点 snap 到最近节拍）")
     bgm_up = st.file_uploader(
         "上传 BGM（mp3）", type=["mp3"], key=f"bgmup_{pid}", disabled=busy,
     )
@@ -272,7 +299,51 @@ def _render_brief(store: ProjectStore, project: Project) -> None:
             st.error(str(exc))
         else:
             st.session_state.pop(f"bgmup_{pid}", None)
-            st.success("BGM 已上传，export 重置待运行")
+            st.success("BGM 已上传，timeline 起重置待运行")
+            st.rerun()
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    beat_sync = st.checkbox(
+        "BGM 卡点对齐（场景切换点对齐节拍）", value=project.config.beat_sync,
+        key=f"beatsync_{pid}", disabled=busy,
+        help="需要先上传 BGM；切换点最多向前顺延 0.4s 对齐最近节拍（配音不重叠，停顿处只有 BGM）",
+    )
+    if beat_sync != project.config.beat_sync:
+        try:
+            edits.set_beat_sync(store, project, beat_sync)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
+
+    st.divider()
+    st.subheader("音效库（场景切点音效）")
+    st.caption("上传 mp3/wav 音效入库（assets/sfx/），到「分镜确认」页给场景绑定切点音效（M8）。")
+    sfx_assets = sorted(
+        aid for aid, a in project.assets.items() if aid.startswith("sfx_") and a.type == "audio"
+    )
+    if not sfx_assets:
+        st.caption("（暂无音效素材）")
+    for aid in sfx_assets:
+        s1, s2 = st.columns([6, 1])
+        s1.caption(f"{aid}  ·  {project.assets[aid].path}")
+        if s2.button("删除", key=f"delsfx_{pid}_{aid}", disabled=busy):
+            edits.remove_sfx(store, project, aid)
+            st.rerun()
+    sfx_up = st.file_uploader(
+        "上传音效（mp3/wav）", type=["mp3", "wav"], key=f"sfxup_{pid}", disabled=busy,
+    )
+    if sfx_up is not None:
+        tmp = store.project_dir(pid) / (".tmp_sfx_upload" + Path(sfx_up.name).suffix)
+        tmp.write_bytes(sfx_up.getbuffer())
+        try:
+            edits.add_sfx(store, project, tmp)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state.pop(f"sfxup_{pid}", None)
+            st.success("音效已入库，timeline 起重置待运行")
             st.rerun()
         finally:
             tmp.unlink(missing_ok=True)
@@ -429,7 +500,7 @@ def _clear_scene_edit_keys(pid: str) -> None:
     """清本项目分镜编辑 widget key（保存/增删/排序后调用，防脏值残留）。"""
     for k in list(st.session_state):
         if k.startswith(("narration_", "visual_", "imgprompt_", "motion_",
-                         "shotsize_", "dur_", "sfx_")):
+                         "shotsize_", "dur_", "sfx_", "sfxsel_")):
             st.session_state.pop(k, None)
 
 
@@ -519,8 +590,26 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
             )
             sfx = st.text_input(
                 "音效描述", value=s.sfx, key=f"sfx_{pid}_{s.scene_id}",
-                help="阶段四素材自备 assets/sfx/；当前仅记录",
+                help="文本标注（导演提案）；实际切点音效在下方选择（素材来自策划页音效库）",
             )
+            sfx_ids = sorted(
+                aid for aid, a in project.assets.items() if aid.startswith("sfx_") and a.type == "audio"
+            )
+            sfx_options: list[str | None] = [None, *sfx_ids]
+            sfx_sel = st.selectbox(
+                "切点音效（场景起点）", sfx_options,
+                index=sfx_options.index(s.sfx_asset_id) if s.sfx_asset_id in sfx_ids else 0,
+                format_func=lambda v: "无" if v is None else v,
+                key=f"sfxsel_{pid}_{s.scene_id}", disabled=busy,
+                help="M8：音效在场景切换点播放（时间线组装 + 导出音效轨）",
+            )
+            if sfx_sel != s.sfx_asset_id:
+                try:
+                    edits.select_scene_sfx(store, project, s.scene_id, sfx_sel)
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
             st.caption(f"status={s.status}  start={s.start_ms}ms  cost={s.cost}")
 
             _render_candidate_gallery(store, project, s, pid, busy)

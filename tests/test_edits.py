@@ -223,7 +223,8 @@ def test_add_bgm(store, tmp_path):
     assert dest.read_bytes() == b"mp3-body"
     loaded = store.load("proj_edit")
     assert loaded.pipeline["export"] == "pending"
-    assert loaded.pipeline["timeline"] == "done"            # 只失效导出
+    assert loaded.pipeline["timeline"] == "pending"         # M8：卡点对齐依赖 BGM → timeline 起重跑
+    assert loaded.pipeline["animate"] == "done"             # 素材上游不动
 
 
 # ---------------------------------------------------------------- 重 roll / 精修 / 重写

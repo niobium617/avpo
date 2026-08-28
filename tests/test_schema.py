@@ -61,17 +61,17 @@ def test_status_assignment_validated(sample_project: Project) -> None:
         sample_project.scenes[0].status = "finished"  # type: ignore[assignment]
 
 
-# ---------------------------------------------------------------- M6-7.1 schema 0.2 / M7-8.1 0.3
+# ---------------------------------------------------------------- M6-7.1 schema 0.2 / M7-8.1 0.3 / M8 0.4
 
-def test_new_project_schema_version_030() -> None:
-    """M7：新项目 schema_version = 0.3，pipeline 含 animate 节点。"""
-    project = Project(project_id="proj_m7")
-    assert project.schema_version == "0.3"
+def test_new_project_schema_version_040() -> None:
+    """M8：新项目 schema_version = 0.4，pipeline 含 animate 节点。"""
+    project = Project(project_id="proj_m8")
+    assert project.schema_version == "0.4"
     assert list(project.pipeline) == ["direct", "confirm", "gen_assets", "animate", "timeline", "export"]
 
 
 def test_legacy_json_loads_with_new_defaults() -> None:
-    """旧 JSON（schema 0.1，无 M6/M7 键）加载：新字段全部落到默认值。"""
+    """旧 JSON（schema 0.1，无 M6/M7/M8 键）加载：新字段全部落到默认值。"""
     data = {
         "project_id": "legacy",
         "schema_version": "0.1",
@@ -89,6 +89,9 @@ def test_legacy_json_loads_with_new_defaults() -> None:
     assert s.end_image_asset_id is None
     assert s.image_asset_id is None
     assert s.motion_plan is None                   # M7-8.1：未跑 animate 无运镜计划
+    assert s.sfx_asset_id is None                  # M8：音效未绑定
+    assert project.timeline.sfx == []              # M8：音效轨为空
+    assert project.config.beat_sync is False       # M8：卡点对齐默认关
 
 
 def test_motion_plan_roundtrip() -> None:

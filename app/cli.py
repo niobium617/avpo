@@ -104,12 +104,17 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         for node, st in project.pipeline.items():
             pipe.add(f"{node}  [{_style(st)}]{st}[/{_style(st)}]")
 
+        root.add(
+            f"[cyan]config[/cyan]  style={project.config.style}  "
+            f"beat_sync={project.config.beat_sync}（M8 BGM 卡点对齐）"
+        )
+
         scenes = root.add(f"[cyan]scenes[/cyan] ({len(project.scenes)})")
         for s in project.scenes:
             scenes.add(
                 f"{s.scene_id}  [{_style(s.status)}]{s.status}[/{_style(s.status)}]  "
                 f"motion={s.motion}  img={s.image_asset_id or '-'}  "
-                f"文案 {len(s.narration)} 字"
+                f"sfx={s.sfx_asset_id or '-'}  文案 {len(s.narration)} 字"
             )
 
         vo = root.add("[cyan]voiceover[/cyan]")
@@ -125,7 +130,8 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         tl = root.add("[cyan]timeline[/cyan]")
         if clips:
             tl.add(
-                f"{len(clips)} 段 总 {project.voiceover.duration_ms or '-'}ms  "
+                f"{len(clips)} 段视频  sfx {len(project.timeline.sfx)} 段  "
+                f"总 {project.voiceover.duration_ms or '-'}ms  "
                 f"末段止于 {clips[-1].start_ms + clips[-1].duration_ms}ms"
             )
         else:

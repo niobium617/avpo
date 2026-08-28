@@ -10,27 +10,39 @@
   在配音后追加一段静态尾拍 clip（asset_id = scene.end_image_asset_id，motion=none，
   时长 end_frame_ms，硬切 —— 转场属 M9）；下一场景 start_ms 顺延尾拍时长，
   尾拍处无配音只有 BGM，画面展示镜头结束帧；
+- M8 音效轨：scene.sfx_asset_id 绑定的音效放场景全局起点（切点音效），组装进
+  timeline.sfx（AudioClip.duration_ms 留 None —— 导出取素材自身时长不截断）；
+- M8 BGM 卡点：config.beat_sync 且 assets/bgm.mp3 存在时，场景切换点（≥第 2 场景）
+  向前 snap 到最近节拍（≤ SNAP_MAX_MS，只前移不后移 —— 配音不重叠），切点停顿处
+  只有 BGM；节拍解码失败降级跳过（BGM 属装饰，不阻塞主线）；
 - scene.start_ms 记录全局起点 —— 字幕仍保持场景内相对时间戳（M1 产物），导出时按
   scene.start_ms 平移（app/export/jianying.py），单一真相源不破坏幂等；
 - voiceover 顶层字段填汇总：status=done，duration_ms = 整片时长（配音 + 首尾帧
-  尾拍，导出 BGM 铺满全片依赖它）。
+  尾拍 + 卡点停顿，导出 BGM 铺满全片依赖它）。
 
-可重入：每次从头重建 timeline 与 start_ms（覆盖写），重复执行结果一致。
+可重入：每次从头重建 timeline 与 start_ms（覆盖写），重复执行结果一致
+（节拍检测确定性 —— 同文件同输出）。
 """
 
 from pathlib import Path
 
 from mutagen.mp3 import MP3
 
+from app.audio.beats import detect_beats
 from app.core.schema import AudioClip, Project, VideoClip
 from app.core.state import FatalError
+
+# M8 项目素材约定：BGM 与音效目录（edits/export 同源引用，改这里三处生效）
+BGM_FILENAME = "bgm.mp3"
+SFX_DIR = "assets/sfx"
+SNAP_MAX_MS = 400           # 卡点对齐：切点向前 snap 的最大提前量（切点停顿 ≤ 0.4s）
 
 
 def build_timeline(project: Project, project_root: Path) -> None:
     """组装 project.timeline / scene.start_ms / voiceover 汇总。就地修改 project。
 
     Raises:
-        FatalError: 场景为空、配音/图资产或文件缺失（带修复提示）。
+        FatalError: 场景为空、配音/图/音效资产或文件缺失（带修复提示）。
     """
     if not project.scenes:
         raise FatalError("没有分镜可组装", hint="先跑 avpo direct 生成分镜")
@@ -38,7 +50,11 @@ def build_timeline(project: Project, project_root: Path) -> None:
     project_root = Path(project_root)
     video: list[VideoClip] = []
     voiceover: list[AudioClip] = []
+    sfx: list[AudioClip] = []
     total_ms = 0
+
+    # M8 卡点对齐：开关开启且 BGM 已上传时检测节拍（解码失败降级跳过，不阻塞）
+    beats = _load_beats(project, project_root)
 
     for scene in project.scenes:
         vo_id = f"vo_{scene.scene_id}"
@@ -76,12 +92,36 @@ def build_timeline(project: Project, project_root: Path) -> None:
                 hint="先跑 avpo gen-assets 重新生成配音",
             )
 
+        # M8 卡点：切点向前 snap 到最近节拍（首场景从 0 起不动；只前移不后移）
+        if beats and total_ms > 0:
+            snapped = _snap_to_beat(total_ms, beats)
+            if snapped is not None:
+                total_ms = snapped
+
         scene.start_ms = total_ms
         video.append(VideoClip(
             asset_id=img_id, start_ms=total_ms, duration_ms=duration_ms,
             motion=scene.motion, scene_id=scene.scene_id,
         ))
         voiceover.append(AudioClip(asset_id=vo_id, offset_ms=total_ms, duration_ms=duration_ms))
+
+        # M8 音效轨：绑定音效放场景起点（切点音效，时长导出取素材自身）
+        if scene.sfx_asset_id:
+            sfx_asset = project.assets.get(scene.sfx_asset_id)
+            if sfx_asset is None:
+                raise FatalError(
+                    f"scene {scene.scene_id} 音效资产 {scene.sfx_asset_id} 不存在",
+                    hint="到策划页重新上传音效",
+                )
+            sfx_path = project_root / sfx_asset.path
+            if not sfx_path.is_file():
+                raise FatalError(
+                    f"音效文件缺失: {sfx_path}",
+                    hint="到策划页重新上传音效",
+                )
+            sfx.append(AudioClip(
+                asset_id=scene.sfx_asset_id, offset_ms=total_ms, duration_ms=None,
+            ))
         total_ms += duration_ms
 
         # M7-8.5 首尾帧尾拍：配音后追加静态尾拍（运镜计划由 animate 节点解析）
@@ -110,8 +150,35 @@ def build_timeline(project: Project, project_root: Path) -> None:
 
     project.timeline.video = video
     project.timeline.voiceover = voiceover
-    project.voiceover.duration_ms = total_ms          # 整片时长：配音 + 首尾帧尾拍
+    project.timeline.sfx = sfx
+    project.voiceover.duration_ms = total_ms          # 整片时长：配音 + 首尾帧尾拍 + 卡点停顿
     project.voiceover.status = "done"
+
+
+def _load_beats(project: Project, project_root: Path) -> list[int]:
+    """M8 卡点节拍：开关开启且 BGM 已上传时检测；否则空列表（不卡点）。
+
+    解码失败降级为空（BGM 属装饰，不阻塞主线 —— 与模板 BGM 缺失降级同语义）。
+    """
+    if not project.config.beat_sync:
+        return []
+    bgm_path = project_root / "assets" / BGM_FILENAME
+    if not bgm_path.is_file():
+        return []
+    try:
+        return detect_beats(bgm_path)
+    except ValueError:
+        return []
+
+
+def _snap_to_beat(ms: int, beats: list[int]) -> int | None:
+    """[ms, ms+SNAP_MAX_MS] 内最近的节拍；无则 None（切点保持自然位置）。"""
+    for b in beats:
+        if ms <= b <= ms + SNAP_MAX_MS:
+            return b
+        if b > ms + SNAP_MAX_MS:
+            break
+    return None
 
 
 def _audio_duration_ms(path: Path) -> int:

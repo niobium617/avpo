@@ -17,6 +17,8 @@ dependencies = [
     "pyJianYingDraft==0.3.0",
     "python-dotenv==1.2.3",
     "streamlit==1.62.0",
+    "miniaudio==1.71",
+    "numpy==2.5.2",
 ]
 
 [project.scripts]
@@ -26,7 +28,7 @@ avpo = "app.cli:app"
 dev = ["pytest==9.1.1"]
 
 [tool.setuptools]
-packages = ["app", "app.core", "app.director", "app.tts", "app.vision", "app.timeline", "app.export", "app.web"]
+packages = ["app", "app.audio", "app.core", "app.director", "app.tts", "app.vision", "app.timeline", "app.export", "app.web"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

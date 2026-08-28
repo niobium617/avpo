@@ -8,7 +8,10 @@
 - select_image_candidate 候选图改选 → 只失效 timeline/export（素材不重跑）
 - select/clear_end_frame  首尾帧设置/清除（M7：从候选图选结束帧）→ animate 起重跑
 - add/remove_reference_image  参考图图组管理（多角度/角色标签）
-- add_bgm                BGM 早期上传 → export 重跑
+- add_bgm                BGM 上传 → timeline 起重跑（M8 卡点对齐依赖 BGM）
+- add/remove_sfx         音效素材入库/删除（assets/sfx/，M8）
+- select_scene_sfx       场景起点音效绑定/解绑（M8）→ timeline 起重跑
+- set_beat_sync          BGM 卡点对齐开关（M8）→ timeline 起重跑
 - reroll_scene_candidates 候选图换种子重 roll（人类触发单次）
 - refine_scene_image     图生图精修：选中图作参考 + 同种子 → 新候选 v_{k+1}
 - rewrite_scene          单场景 AI 重写（narration 默认不动，scene_id 保持）
@@ -27,10 +30,9 @@ from app.core.project import ProjectStore
 from app.core.schema import PIPELINE_NODES, Asset, Brief, Project, ReferenceImage, Scene
 from app.core.styles import compose_image_prompt, load_style
 from app.director.director import Director
+from app.timeline.builder import BGM_FILENAME, SFX_DIR
 from app.vision.base import ImageProvider
 from app.vision.cache import ImageCache, prompt_hash
-
-BGM_FILENAME = "bgm.mp3"            # 导出节点约定的 BGM 路径（assets/bgm.mp3）
 
 
 def _get_scene(project: Project, scene_id: str) -> Scene:
@@ -180,15 +182,93 @@ def remove_reference_image(store: ProjectStore, project: Project, ref_id: str) -
 
 
 def add_bgm(store: ProjectStore, project: Project, path: Path) -> Project:
-    """BGM 早期上传：拷贝到 assets/bgm.mp3（导出节点约定路径），export 重跑。"""
+    """BGM 上传：拷贝到 assets/bgm.mp3（导出节点约定路径）。
+
+    M8 起失效 timeline（含）起 —— 卡点对齐按 BGM 节拍组装时间线，换 BGM 必须重装。
+    """
     path = Path(path)
     if not path.is_file():
         raise ValueError(f"BGM 文件不存在: {path}")
     dest = store.project_dir(project.project_id) / "assets" / BGM_FILENAME
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(path, dest)
-    project.pipeline["export"] = "pending"
+    _invalidate_from(project, "timeline")
     store.save(project, message=f"{project.project_id}: 上传 BGM")
+    return project
+
+
+def add_sfx(store: ProjectStore, project: Project, path: Path) -> Project:
+    """音效入库（M8）：拷贝到 assets/sfx/，注册 audio 资产（id = sfx_<名>）。
+
+    同名重新上传 = 覆盖文件与资产（与 add_bgm 同语义）；素材自备/上传，
+    无 API 成本。timeline 起重跑（时间线组装音效轨）。
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f"音效文件不存在: {path}")
+    if path.suffix.lower() not in (".mp3", ".wav"):
+        raise ValueError(f"音效只支持 mp3/wav: {path.suffix}")
+    dest = store.project_dir(project.project_id) / SFX_DIR / path.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(path, dest)
+    sfx_id = f"sfx_{path.stem}"
+    project.assets[sfx_id] = Asset(
+        type="audio",
+        path=str(dest.relative_to(store.project_dir(project.project_id))).replace("\\", "/"),
+        cost=0.0,
+        status="done",
+    )
+    _invalidate_from(project, "timeline")
+    store.save(project, message=f"{project.project_id}: 音效入库 {sfx_id}")
+    return project
+
+
+def remove_sfx(store: ProjectStore, project: Project, sfx_asset_id: str) -> Project:
+    """删除音效素材：清场景引用（防悬空引用炸校验）+ 删资产与文件。timeline 起重跑。"""
+    asset = project.assets.get(sfx_asset_id)
+    if asset is None or not sfx_asset_id.startswith("sfx_"):
+        raise ValueError(f"音效资产不存在: {sfx_asset_id}")
+    for scene in project.scenes:
+        if scene.sfx_asset_id == sfx_asset_id:
+            scene.sfx_asset_id = None
+    (store.project_dir(project.project_id) / asset.path).unlink(missing_ok=True)
+    project.assets.pop(sfx_asset_id, None)
+    _invalidate_from(project, "timeline")
+    store.save(project, message=f"{project.project_id}: 删除音效 {sfx_asset_id}")
+    return project
+
+
+def select_scene_sfx(
+    store: ProjectStore, project: Project, scene_id: str, sfx_asset_id: str | None,
+) -> Project:
+    """场景起点音效绑定/解绑（M8，None = 解绑）：校验资产为 audio。
+
+    音效在时间线组装时放到场景全局起点（切点音效）；timeline 起重跑。
+    """
+    scene = _get_scene(project, scene_id)
+    if sfx_asset_id is not None:
+        asset = project.assets.get(sfx_asset_id)
+        if asset is None:
+            raise ValueError(f"音效资产不存在: {sfx_asset_id}")
+        if asset.type != "audio":
+            raise ValueError(f"{sfx_asset_id} 不是音频资产: {asset.type}")
+    scene.sfx_asset_id = sfx_asset_id
+    _invalidate_from(project, "timeline")
+    store.save(
+        project,
+        message=f"{project.project_id}: {scene_id} 音效" + (f"绑定 {sfx_asset_id}" if sfx_asset_id else "解绑"),
+    )
+    return project
+
+
+def set_beat_sync(store: ProjectStore, project: Project, enabled: bool) -> Project:
+    """BGM 卡点对齐开关（M8）：True 时 timeline 组装把场景切换点 snap 到最近节拍。
+
+    BGM 未上传时开关无效果（组装静默跳过，BGM 属装饰不阻塞）；timeline 起重跑。
+    """
+    project.config.beat_sync = bool(enabled)
+    _invalidate_from(project, "timeline")
+    store.save(project, message=f"{project.project_id}: 卡点对齐 {'开' if enabled else '关'}")
     return project
 
 

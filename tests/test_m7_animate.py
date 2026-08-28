@@ -186,14 +186,15 @@ def test_load_shim_inserts_animate_node(store) -> None:
     assert project.pipeline["animate"] == "pending"
     for n in old_nodes:
         assert project.pipeline[n] == "done"     # 旧状态保留，断点续跑语义不破坏
-    assert project.schema_version == "0.3"
+    assert project.schema_version == "0.4"       # M8：内存升版到 0.4
 
 
 def test_load_keeps_030_project_untouched(store) -> None:
     project = Project(project_id="p3", scenes=[_scene("none")])
     store.create(project)
-    store.load("p3")                             # 0.3 项目加载无变化
-    assert list(store.load("p3").pipeline) == list(PIPELINE_NODES)
+    loaded = store.load("p3")                    # 0.3 项目：pipeline 键不动，版本升 0.4
+    assert list(loaded.pipeline) == list(PIPELINE_NODES)
+    assert loaded.schema_version == "0.4"
 
 
 # ---------------------------------------------------------------- timeline 尾拍

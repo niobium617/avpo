@@ -7,4 +7,6 @@ mutagen==1.48.1
 pyJianYingDraft==0.3.0
 python-dotenv==1.2.3
 streamlit==1.62.0
+miniaudio==1.71
+numpy==2.5.2
 pytest==9.1.1

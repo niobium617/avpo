@@ -58,6 +58,7 @@ class ProjectConfig(StrictModel):
     image: ImageConfig = Field(default_factory=ImageConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     style: str = "default"   # M3-4.4 风格模板 id（templates/，default = MVP 固定样式）
+    beat_sync: bool = False  # M8：BGM 卡点对齐（timeline 组装时场景切换点 snap 到最近节拍）
 
 
 # ---------------------------------------------------------------- 内容
@@ -133,7 +134,8 @@ class Scene(StrictModel):
     motion_plan: MotionPlan | None = None   # M7-8.1 animate 节点写入的关键帧运镜计划（None = 未跑 animate）
     shot_size: ShotSize = ""    # 景别
     planned_duration_ms: int | None = None   # 规划时长（预估；时间线以配音实测为准）
-    sfx: str = ""               # 音效描述（阶段四；素材自备 assets/sfx/）
+    sfx: str = ""               # 音效描述（文本，供创作者标注；实际素材经 sfx_asset_id 引用）
+    sfx_asset_id: str | None = None   # M8：场景起点音效素材（assets/sfx/ 注册的 audio 资产；None = 无）
     start_ms: int = 0           # 时间线全局起点（app/timeline/builder.py 组装时写入）
     status: TaskStatus = "pending"
     cost: dict[str, float] = Field(default_factory=dict)   # 如 {"image": 0.02, "llm": 0.001}
@@ -169,10 +171,15 @@ class AudioClip(StrictModel):
 
 
 class Timeline(StrictModel):
-    """MVP 固定三轨中的两条素材轨（字幕轨 = subtitles 字段）。"""
+    """三轨素材（字幕轨 = subtitles 字段）。
+
+    M8：sfx 音效轨（场景起点音效，AudioClip.offset_ms = 场景全局起点，
+    duration_ms 留 None —— 导出时取素材自身时长，音效不截断）。
+    """
 
     video: list[VideoClip] = Field(default_factory=list)
     voiceover: list[AudioClip] = Field(default_factory=list)
+    sfx: list[AudioClip] = Field(default_factory=list)
 
 
 class Asset(StrictModel):
@@ -211,7 +218,7 @@ class PipelineError(StrictModel):
 class Project(StrictModel):
     project_id: str
     title: str = ""
-    schema_version: str = "0.3"   # M7-8.1：0.2 → 0.3（增量字段，旧 JSON 直接加载，load 时内存升版）
+    schema_version: str = "0.4"   # M8：0.3 → 0.4（增量字段，旧 JSON 直接加载，load 时内存升版）
     config: ProjectConfig = Field(default_factory=ProjectConfig)
     brief: Brief | None = None    # M6-7.1 阶段一策划简报（None = 旧项目/未策划）
     reference_images: list[ReferenceImage] = Field(default_factory=list)   # M6-7.1 参考图组
@@ -257,6 +264,13 @@ class Project(StrictModel):
             if clip.asset_id not in asset_ids:
                 raise ValueError(f"时间线音频轨引用了不存在的 asset_id: {clip.asset_id}")
 
+        # M8：音效轨引用存在的 audio 资产
+        for clip in self.timeline.sfx:
+            if clip.asset_id not in asset_ids:
+                raise ValueError(f"时间线音效轨引用了不存在的 asset_id: {clip.asset_id}")
+            if self.assets[clip.asset_id].type != "audio":
+                raise ValueError(f"时间线音效轨引用了非 audio 资产: {clip.asset_id}")
+
         # 配音 / 场景图 / 候选图 / 首尾帧引用存在的 asset
         if self.voiceover.asset_id and self.voiceover.asset_id not in asset_ids:
             raise ValueError(f"voiceover 引用了不存在的 asset_id: {self.voiceover.asset_id}")
@@ -271,6 +285,10 @@ class Project(StrictModel):
             if scene.end_image_asset_id and scene.end_image_asset_id not in asset_ids:
                 raise ValueError(
                     f"scene {scene.scene_id} 的首尾帧引用了不存在的 asset_id: {scene.end_image_asset_id}"
+                )
+            if scene.sfx_asset_id and scene.sfx_asset_id not in asset_ids:
+                raise ValueError(
+                    f"scene {scene.scene_id} 的音效引用了不存在的 asset_id: {scene.sfx_asset_id}"
                 )
 
         # 参考图 id 唯一
