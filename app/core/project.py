@@ -109,14 +109,17 @@ class ProjectStore:
           并按 PIPELINE_NODES 顺序重建 —— 老 JSON 的 pipeline 只有 5 个键，
           缺 animate 会让 run_task 取键炸 KeyError；
         - M8：schema 0.3 → 0.4（sfx_asset_id/timeline.sfx/beat_sync 均为
-          默认值字段，pydantic 直接填充，无需补键）。
+          默认值字段，pydantic 直接填充，无需补键）；
+        - M9：schema 0.4 → 0.5（Scene.transition/VideoClip.transition 均为
+          默认值字段 —— 旧项目加载后 Scene.transition="auto"，跑 timeline 即
+          获得止损转场默认，无需补键）。
         """
         path = self.json_path(project_id)
         if not path.is_file():
             raise FileNotFoundError(f"项目不存在: {project_id}（{path}）")
         project = Project.model_validate_json(path.read_text(encoding="utf-8"))
-        if project.schema_version in ("0.1", "0.2", "0.3"):
-            project.schema_version = "0.4"
+        if project.schema_version in ("0.1", "0.2", "0.3", "0.4"):
+            project.schema_version = "0.5"
         project.pipeline = {node: project.pipeline.get(node, "pending") for node in PIPELINE_NODES}
         return project
 

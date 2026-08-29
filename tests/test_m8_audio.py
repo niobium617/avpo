@@ -484,7 +484,7 @@ def test_export_bgm_style_fallback_still_works(tmp_path: Path) -> None:
     assert "bgm" in tracks
 
 
-# ================================================================ schema 0.4
+# ================================================================ schema 0.5（M9 起；sfx 引用校验为 M8）
 
 def test_schema_rejects_dangling_sfx_ref() -> None:
     """场景音效引用不存在的资产 → 构造即报错。"""

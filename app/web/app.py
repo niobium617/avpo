@@ -28,7 +28,7 @@ from app.core import edits, env, errors, pipeline, providers, styles
 from app.web import tasks
 from app.core.cost import DEFAULT_BUDGET, summarize
 from app.core.project import ProjectStore
-from app.core.schema import PIPELINE_NODES, Brief, MotionKind, Project, Scene, ShotSize
+from app.core.schema import PIPELINE_NODES, Brief, MotionKind, Project, Scene, ShotSize, TransitionKind
 from app.tts.tts_edge import EdgeTTS
 
 STATUS_COLORS = {"pending": "orange", "running": "blue", "done": "green", "failed": "red"}
@@ -485,6 +485,13 @@ def _render_pipeline(store: ProjectStore, project: Project) -> None:
 # ---------------------------------------------------------------- 页面 3：分镜确认
 
 SHOT_SIZES = list(ShotSize.__args__)                   # 含 ""（未指定）
+# M9 止损转场中文标签（分镜页 selectbox format_func）
+TRANSITION_LABELS = {
+    "auto": "自动（无结束帧→闪白）",
+    "none": "无",
+    "flash_white": "闪白 0.3s",
+    "shake": "震动 0.3s",
+}
 
 
 def _next_scene_id(project: Project) -> str:
@@ -500,7 +507,7 @@ def _clear_scene_edit_keys(pid: str) -> None:
     """清本项目分镜编辑 widget key（保存/增删/排序后调用，防脏值残留）。"""
     for k in list(st.session_state):
         if k.startswith(("narration_", "visual_", "imgprompt_", "motion_",
-                         "shotsize_", "dur_", "sfx_", "sfxsel_")):
+                         "shotsize_", "dur_", "sfx_", "sfxsel_", "trans_")):
             st.session_state.pop(k, None)
 
 
@@ -510,7 +517,8 @@ def _render_candidate_gallery(store: ProjectStore, project: Project, scene, pid:
     reroll/refine 后台任务。
 
     选中候选打 ✓（首帧，时间线用）；结束帧（首尾帧）独立选择 —— animate 节点渲染为
-    配音后的 0.4s 静态尾拍（硬切，转场属 M9），走 edits.select_end_frame/clear_end_frame
+    配音后的 0.4s 静态尾拍（硬切；M9 起无结束帧的切点自动闪白止损，转场选择见上方
+    selectbox），走 edits.select_end_frame/clear_end_frame
     （animate 起重跑）。refine（图生图精修）仅渠道支持参考图注入时渲染（能力标志内省）。
     """
     caps = providers.image_capabilities(project.config.image)
@@ -540,7 +548,7 @@ def _render_candidate_gallery(store: ProjectStore, project: Project, scene, pid:
                                disabled=busy):
                     edits.select_end_frame(store, project, scene.scene_id, cid)
                     st.rerun()
-        st.caption("结束帧 = 镜头结束画面：渲染为配音后的静态尾拍（约 0.4s，硬切）")
+        st.caption("结束帧 = 镜头结束画面：渲染为配音后的静态尾拍（约 0.4s，硬切；未设结束帧的切点 M9 自动闪白止损）")
         r1, r2 = st.columns(2)
         if r1.button("重新生成候选（换种子）", key=f"reroll_{pid}_{scene.scene_id}", disabled=busy):
             _start_node(store, project, "reroll_scene", scene_id=scene.scene_id)
@@ -606,6 +614,21 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
             if sfx_sel != s.sfx_asset_id:
                 try:
                     edits.select_scene_sfx(store, project, s.scene_id, sfx_sel)
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
+            transitions = list(TransitionKind.__args__)
+            trans_sel = st.selectbox(
+                "转场（进入下一镜的切点）", transitions,
+                index=transitions.index(s.transition),
+                format_func=lambda v: TRANSITION_LABELS[v],
+                key=f"trans_{pid}_{s.scene_id}", disabled=busy,
+                help="M9 止损：auto = 无结束帧的切点自动闪白 0.3s 覆盖不可修帧（有结束帧保持硬切）；显式选择逐镜覆盖",
+            )
+            if trans_sel != s.transition:
+                try:
+                    edits.set_scene_transition(store, project, s.scene_id, trans_sel)
                 except ValueError as exc:
                     st.error(str(exc))
                 else:

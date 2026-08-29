@@ -19,7 +19,7 @@ from app.core.schema import MotionPlan, Scene
 
 ZOOM_SCALE = 1.15          # 推近/拉远的关键帧缩放（pan 防露边的恒缩放）
 PAN_EXTENT = 0.12          # 摇镜起/终点的 position_x（单位：半个画布宽）
-END_FRAME_MS = 400         # 首尾帧尾拍时长（配音后追加的静态尾拍，硬切；转场属 M9）
+END_FRAME_MS = 400         # 首尾帧尾拍时长（配音后追加的静态尾拍，硬切；切点转场见 M9）
 
 
 def resolve_motion_plan(scene: Scene) -> MotionPlan:

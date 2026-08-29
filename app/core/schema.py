@@ -13,6 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 TaskStatus = Literal["pending", "running", "done", "failed"]
 MotionKind = Literal["zoom_in_slow", "zoom_out", "pan_left", "pan_right", "none"]
+# M9 止损转场：Scene.transition 取值。auto = 无结束帧的切点自动闪白（止损默认），
+# 显式 none/flash_white/shake 为创作者逐镜覆盖（VideoClip 上的已解析值不含 auto）
+TransitionKind = Literal["auto", "none", "flash_white", "shake"]
 AssetKind = Literal["image", "audio", "video"]
 # 景别（M6 阶段一：分镜脚本标注）
 ShotSize = Literal["远景", "全景", "中景", "近景", "特写", "空镜", ""]
@@ -121,6 +124,7 @@ class Scene(StrictModel):
     M6 扩展（阶段一/二）：shot_size 景别、planned_duration_ms 规划时长（对齐 BGM
     节奏）、sfx 音效描述、image_candidates 候选图资产 id 列表（人审选中的
     image_asset_id 供时间线使用）、end_image_asset_id 为 M7「首尾帧」预埋字段。
+    M9 扩展：transition 切点转场（auto 止损默认，见 TransitionKind）。
     """
 
     scene_id: str
@@ -136,6 +140,7 @@ class Scene(StrictModel):
     planned_duration_ms: int | None = None   # 规划时长（预估；时间线以配音实测为准）
     sfx: str = ""               # 音效描述（文本，供创作者标注；实际素材经 sfx_asset_id 引用）
     sfx_asset_id: str | None = None   # M8：场景起点音效素材（assets/sfx/ 注册的 audio 资产；None = 无）
+    transition: TransitionKind = "auto"   # M9 止损转场：进入下一镜的切点转场（auto = 无结束帧自动闪白）
     start_ms: int = 0           # 时间线全局起点（app/timeline/builder.py 组装时写入）
     status: TaskStatus = "pending"
     cost: dict[str, float] = Field(default_factory=dict)   # 如 {"image": 0.02, "llm": 0.001}
@@ -162,6 +167,9 @@ class VideoClip(StrictModel):
     duration_ms: int
     motion: MotionKind = "none"
     scene_id: str = ""   # M7-8.1 归属场景（timeline 组装写入；导出据此取 scene.motion_plan 渲染运镜）
+    # M9 止损转场：该 clip 结尾进入下一段的转场（timeline 组装解析 scene.transition 后写入；
+    # 转场挂在前一段上 —— pyJianYingDraft add_transition 语义）
+    transition: Literal["none", "flash_white", "shake"] = "none"
 
 
 class AudioClip(StrictModel):
@@ -218,7 +226,7 @@ class PipelineError(StrictModel):
 class Project(StrictModel):
     project_id: str
     title: str = ""
-    schema_version: str = "0.4"   # M8：0.3 → 0.4（增量字段，旧 JSON 直接加载，load 时内存升版）
+    schema_version: str = "0.5"   # M9：0.4 → 0.5（增量字段，旧 JSON 直接加载，load 时内存升版）
     config: ProjectConfig = Field(default_factory=ProjectConfig)
     brief: Brief | None = None    # M6-7.1 阶段一策划简报（None = 旧项目/未策划）
     reference_images: list[ReferenceImage] = Field(default_factory=list)   # M6-7.1 参考图组

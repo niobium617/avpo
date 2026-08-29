@@ -2,7 +2,45 @@
 
 > 动态进度跟踪。方案见 `EXECUTION_PLAN.md`，任务拆解见 `IMPLEMENTATION_PLAN.md`。
 
-## 当前状态（2026-08-28）
+## 当前状态（2026-08-29）
+
+**M9 止损转场 —— 8.1~8.8 全部完成**（317 测试全绿 + 2 live 跳过）
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 8.1 schema 0.5 | `TransitionKind`（auto/none/flash_white/shake）+ `Scene.transition` 默认 auto（止损）+ `VideoClip.transition` 默认 none（已解析值）+ load shim 0.1~0.4 → 0.5（纯默认值字段，无需补键） | ✅ |
+| 8.2 timeline 止损解析 | builder：`TRANSITION_DEFAULT=flash_white` + `_resolve_transition`（auto = 无结束帧的切点自动闪白；显式覆盖优先；末场景无切点恒 none；有尾拍转场落在尾拍 clip，主镜头保持 none） | ✅ |
+| 8.3 导出转场 | jianying：`_TRANSITION_MS=300` + `_TRANSITION_TYPES`（闪白 = 非叠加 / 震动 = 叠加，剪映原生元数据）+ 前段 `add_transition`（轨道时长不变） | ✅ |
+| 8.4 edits | `set_scene_transition`（显式 ValueError 校验 —— pydantic 赋值抛 ValidationError 非 ValueError + timeline 起重跑，animate/gen_assets 不动） | ✅ |
+| 8.5 web 分镜页 | 每场景「转场」selectbox（自动（无结束帧→闪白）/ 无 / 闪白 0.3s / 震动 0.3s）即时绑定落盘 | ✅ |
+| 8.6 CLI | status 场景行 `trans=` + timeline 行转场数 + 分镜预览 meta 行 | ✅ |
+| 8.7 测试 | `tests/test_m9_transitions.py` 13 条（schema 默认/非法值；timeline 止损/硬切保留/显式覆盖/末场景/尾拍挂载/幂等；edits 落盘与失效；导出材质与 refs）+ web 1 新 + 版本断言 5 处改写 0.5（test_schema/test_store/test_m7_animate） | ✅ **317 全绿** |
+| 8.8 文档 | README 转场（M9）章 + 阶段表/里程碑表 + 已知限制更新；本文件；versions.md schema 0.5 | ✅ |
+
+要点（M9）：
+- **止损 = 自动默认 + 人可覆盖**：auto = 无结束帧（`end_frame_ms == 0`）的切点
+  自动闪白 0.3s —— 画面停在运镜中途的「不可修帧」被转场覆盖；有结束帧的切点
+  保持 M7 静态尾拍硬切（设计过的剪辑）；末场景无切点恒无转场。创作者逐镜覆盖
+  （无/闪白/震动），显式选择始终优先（creator-centric：转场是剪辑决策）。
+- **转场挂前段**：pyJianYingDraft 语义 —— 转场加在切点前一个 clip 上；有尾拍的
+  场景转场落在尾拍 clip（该场景最后一个 clip），主镜头保持 none；轨道时长不变
+  （时间线相邻拼装与 M8 卡点计算不受影响）。
+- **0.3s 固定**：`_TRANSITION_MS`（export/jianying.py）单点可调；闪白 = 非叠加
+  （切点处播放）、震动 = 叠加（剪映原生元数据，编辑器自处理叠化窗口）——导出后
+  打开草稿试看确认（9.7.1 经典转场，资源本地缓存）。
+- **失效语义**：转场设置 `_invalidate_from("timeline")` —— 转场是时间线组装产物，
+  素材与运镜计划上游不动。
+- **旧项目兼容**：0.1~0.4 加载即内存升版 0.5（新字段全默认值）；旧项目跑 timeline
+  即获得止损默认（Scene.transition=auto），可逐镜关掉。
+
+### 下一步
+
+- 候选池：Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
+- 题材模板积累（templates/）；工作台多任务并行（当前单会话单任务）。
+
+---
+
+## M8 音频（2026-08-28）—— 8.1~8.9 全部完成
 
 **M8 音频 —— 8.1~8.9 全部完成**（303 测试全绿 + 2 live 跳过）
 
@@ -33,12 +71,6 @@
   beat_sync 默认关 = 旧行为（场景首尾相接）。
 - **测试**：303 = 276（M7）+ 25（m8_audio）+ 2（web）；导出断言注意 sfx 段仍带默认
   1.0 倍速曲线材质（extra_material_refs 非空），无淡入断言 = refs 中无 audio_fade。
-
-### 下一步
-
-- **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧（`VideoClip.transition` 字段，M7 尾拍硬切先占位）。
-- 候选池：Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
-- 题材模板积累（templates/）；多任务并行（当前单会话单任务）。
 
 ---
 
@@ -187,9 +219,8 @@ st.progress；按钮防双开；save 线程锁。）
 错误提示（test_errors ✅）全部验证；MVP 可交付使用。
 → ✅ **已达成**（2026-08-22）。**M3 正式关闭。**
 
-## 路线图（2026-08-28 更新）
+## 路线图（2026-08-29 更新）
 
-- **M9 止损转场**：0.3s 闪白/震动覆盖不可修帧（`VideoClip.transition` 字段，M7 尾拍硬切先占位）；
 - 候选池：Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
 - 题材模板积累（templates/）；工作台多任务并行（当前单会话单任务）。
 

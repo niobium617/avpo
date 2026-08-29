@@ -12,6 +12,7 @@
 - add/remove_sfx         音效素材入库/删除（assets/sfx/，M8）
 - select_scene_sfx       场景起点音效绑定/解绑（M8）→ timeline 起重跑
 - set_beat_sync          BGM 卡点对齐开关（M8）→ timeline 起重跑
+- set_scene_transition   场景切点转场（M9 止损：auto/无/闪白/震动）→ timeline 起重跑
 - reroll_scene_candidates 候选图换种子重 roll（人类触发单次）
 - refine_scene_image     图生图精修：选中图作参考 + 同种子 → 新候选 v_{k+1}
 - rewrite_scene          单场景 AI 重写（narration 默认不动，scene_id 保持）
@@ -27,7 +28,7 @@ from pathlib import Path
 from app.core.pipeline import _invalidate_downstream
 from app.core.progress import ProgressCallback, ProgressEvent
 from app.core.project import ProjectStore
-from app.core.schema import PIPELINE_NODES, Asset, Brief, Project, ReferenceImage, Scene
+from app.core.schema import PIPELINE_NODES, Asset, Brief, Project, ReferenceImage, Scene, TransitionKind
 from app.core.styles import compose_image_prompt, load_style
 from app.director.director import Director
 from app.timeline.builder import BGM_FILENAME, SFX_DIR
@@ -269,6 +270,23 @@ def set_beat_sync(store: ProjectStore, project: Project, enabled: bool) -> Proje
     project.config.beat_sync = bool(enabled)
     _invalidate_from(project, "timeline")
     store.save(project, message=f"{project.project_id}: 卡点对齐 {'开' if enabled else '关'}")
+    return project
+
+
+def set_scene_transition(
+    store: ProjectStore, project: Project, scene_id: str, transition: str,
+) -> Project:
+    """场景切点转场（M9 止损）：auto = 无结束帧的切点自动闪白，显式值逐镜覆盖。
+
+    转场在时间线组装时解析进 VideoClip.transition（timeline 起重跑）；
+    取值校验显式 ValueError（pydantic 赋值校验抛 ValidationError，web 只捕前者）。
+    """
+    if transition not in TransitionKind.__args__:
+        raise ValueError(f"非法转场类型: {transition}（可选 {list(TransitionKind.__args__)}）")
+    scene = _get_scene(project, scene_id)
+    scene.transition = transition
+    _invalidate_from(project, "timeline")
+    store.save(project, message=f"{project.project_id}: {scene_id} 转场 {transition}")
     return project
 
 

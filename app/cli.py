@@ -114,7 +114,7 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             scenes.add(
                 f"{s.scene_id}  [{_style(s.status)}]{s.status}[/{_style(s.status)}]  "
                 f"motion={s.motion}  img={s.image_asset_id or '-'}  "
-                f"sfx={s.sfx_asset_id or '-'}  文案 {len(s.narration)} 字"
+                f"sfx={s.sfx_asset_id or '-'}  trans={s.transition}  文案 {len(s.narration)} 字"
             )
 
         vo = root.add("[cyan]voiceover[/cyan]")
@@ -129,8 +129,10 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
         clips = project.timeline.video
         tl = root.add("[cyan]timeline[/cyan]")
         if clips:
+            n_trans = sum(1 for c in clips if c.transition != "none")
             tl.add(
                 f"{len(clips)} 段视频  sfx {len(project.timeline.sfx)} 段  "
+                f"转场 {n_trans} 处  "
                 f"总 {project.voiceover.duration_ms or '-'}ms  "
                 f"末段止于 {clips[-1].start_ms + clips[-1].duration_ms}ms"
             )
@@ -401,6 +403,7 @@ def _print_storyboard(project: Project) -> None:
                 s.shot_size or "",
                 f"~{s.planned_duration_ms}ms" if s.planned_duration_ms else "",
                 f"sfx:{s.sfx}" if s.sfx else "",
+                f"trans:{s.transition}",
             ) if part
         )
         console.print(f"  {s.scene_id} {meta} {s.narration}")

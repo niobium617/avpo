@@ -862,3 +862,31 @@ def test_storyboard_sfx_selectbox_binds_scene(at: AppTest, tmp_path) -> None:
     loaded = _store().load("proj_ui")
     assert loaded.scenes[0].sfx_asset_id == "sfx_whoosh"
     assert loaded.pipeline["timeline"] == "pending"
+
+
+# ---------------------------------------------------------------- 页面 3：M9 止损转场
+
+def test_storyboard_transition_selectbox_binds_scene(at: AppTest) -> None:
+    """分镜页（M9）：转场 selectbox 存在（默认 auto），选择即落盘（timeline 起重跑，animate 不动）。"""
+    _mk_project(scenes=SCENES)
+    store = _store()
+    project = store.load("proj_ui")
+    project.pipeline = {n: "done" for n in project.pipeline}     # 观察 timeline 被重置、animate 不动
+    store.save(project, message="web 测试补 done")
+
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    assert not at.exception
+    trans_sel = at.selectbox(key="trans_proj_ui_s1")
+    assert trans_sel is not None
+    assert trans_sel.value == "auto"                            # 止损默认
+
+    trans_sel.set_value("flash_white")
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.scenes[0].transition == "flash_white"
+    assert loaded.pipeline["timeline"] == "pending"
+    assert loaded.pipeline["animate"] == "done"                 # 运镜/尾拍上游不动

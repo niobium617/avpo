@@ -8,8 +8,13 @@
   + 音频轨 vo clip（offset=累计起点，duration_ms=配音时长）；
 - M7-8.5 首尾帧尾拍：animate 节点解析出 scene.motion_plan 且 end_frame_ms > 0 时，
   在配音后追加一段静态尾拍 clip（asset_id = scene.end_image_asset_id，motion=none，
-  时长 end_frame_ms，硬切 —— 转场属 M9）；下一场景 start_ms 顺延尾拍时长，
+  时长 end_frame_ms，硬切 —— 转场见下 M9）；下一场景 start_ms 顺延尾拍时长，
   尾拍处无配音只有 BGM，画面展示镜头结束帧；
+- M9 止损转场：切点转场挂在该场景最后一个 clip 上（前段末尾进入下一段，
+  pyJianYingDraft 语义）—— scene.transition 经 _resolve_transition 解析：
+  auto = 无结束帧的切点自动闪白覆盖不可修帧（止损），有结束帧保持硬切；
+  显式 none/闪白/震动覆盖优先；末场景无切点恒 none；有尾拍的场景转场落在
+  尾拍 clip 上（主镜头保持 none）；
 - M8 音效轨：scene.sfx_asset_id 绑定的音效放场景全局起点（切点音效），组装进
   timeline.sfx（AudioClip.duration_ms 留 None —— 导出取素材自身时长不截断）；
 - M8 BGM 卡点：config.beat_sync 且 assets/bgm.mp3 存在时，场景切换点（≥第 2 场景）
@@ -29,13 +34,14 @@ from pathlib import Path
 from mutagen.mp3 import MP3
 
 from app.audio.beats import detect_beats
-from app.core.schema import AudioClip, Project, VideoClip
+from app.core.schema import AudioClip, Project, Scene, VideoClip
 from app.core.state import FatalError
 
 # M8 项目素材约定：BGM 与音效目录（edits/export 同源引用，改这里三处生效）
 BGM_FILENAME = "bgm.mp3"
 SFX_DIR = "assets/sfx"
 SNAP_MAX_MS = 400           # 卡点对齐：切点向前 snap 的最大提前量（切点停顿 ≤ 0.4s）
+TRANSITION_DEFAULT = "flash_white"   # M9 止损转场：auto 的默认转场（无结束帧的切点闪白覆盖）
 
 
 def build_timeline(project: Project, project_root: Path) -> None:
@@ -56,7 +62,7 @@ def build_timeline(project: Project, project_root: Path) -> None:
     # M8 卡点对齐：开关开启且 BGM 已上传时检测节拍（解码失败降级跳过，不阻塞）
     beats = _load_beats(project, project_root)
 
-    for scene in project.scenes:
+    for i, scene in enumerate(project.scenes):
         vo_id = f"vo_{scene.scene_id}"
         img_id = scene.image_asset_id
         if img_id is None:
@@ -98,10 +104,17 @@ def build_timeline(project: Project, project_root: Path) -> None:
             if snapped is not None:
                 total_ms = snapped
 
+        # M9 止损转场：切点转场挂在该场景最后一个 clip 上（前段末尾进入下一段）；
+        # 有尾拍时主镜头保持 none、尾拍 clip 携带（转场在尾拍与下一镜之间）
+        transition = _resolve_transition(scene, has_next=i + 1 < len(project.scenes))
+        plan = scene.motion_plan
+        has_tail = bool(plan and plan.end_frame_ms > 0)
+
         scene.start_ms = total_ms
         video.append(VideoClip(
             asset_id=img_id, start_ms=total_ms, duration_ms=duration_ms,
             motion=scene.motion, scene_id=scene.scene_id,
+            transition="none" if has_tail else transition,
         ))
         voiceover.append(AudioClip(asset_id=vo_id, offset_ms=total_ms, duration_ms=duration_ms))
 
@@ -125,8 +138,7 @@ def build_timeline(project: Project, project_root: Path) -> None:
         total_ms += duration_ms
 
         # M7-8.5 首尾帧尾拍：配音后追加静态尾拍（运镜计划由 animate 节点解析）
-        plan = scene.motion_plan
-        if plan and plan.end_frame_ms > 0:
+        if has_tail:
             end_id = scene.end_image_asset_id
             if end_id is None:
                 raise FatalError(
@@ -144,7 +156,7 @@ def build_timeline(project: Project, project_root: Path) -> None:
                 raise FatalError(f"结束帧文件缺失: {end_path}", hint="先跑 avpo gen-assets 重新生成")
             video.append(VideoClip(
                 asset_id=end_id, start_ms=total_ms, duration_ms=plan.end_frame_ms,
-                motion="none", scene_id=scene.scene_id,
+                motion="none", scene_id=scene.scene_id, transition=transition,
             ))
             total_ms += plan.end_frame_ms
 
@@ -179,6 +191,25 @@ def _snap_to_beat(ms: int, beats: list[int]) -> int | None:
         if b > ms + SNAP_MAX_MS:
             break
     return None
+
+
+def _resolve_transition(scene: Scene, has_next: bool) -> str:
+    """M9 止损转场：scene.transition 解析为切点实际转场。
+
+    - 无下一场景（末场景）：无切点，恒 none；
+    - 显式 none/flash_white/shake：创作者逐镜覆盖，决定优先；
+    - auto 止损：无结束帧（end_frame_ms == 0）的切点画面停在运镜中途
+      （不可修帧），自动闪白覆盖；有结束帧时静态尾拍硬切是设计过的剪辑，
+      保持 none。
+    """
+    if not has_next:
+        return "none"
+    if scene.transition != "auto":
+        return scene.transition
+    plan = scene.motion_plan
+    if plan and plan.end_frame_ms > 0:
+        return "none"
+    return TRANSITION_DEFAULT
 
 
 def _audio_duration_ms(path: Path) -> int:

@@ -61,12 +61,12 @@ def test_status_assignment_validated(sample_project: Project) -> None:
         sample_project.scenes[0].status = "finished"  # type: ignore[assignment]
 
 
-# ---------------------------------------------------------------- M6-7.1 schema 0.2 / M7-8.1 0.3 / M8 0.4
+# ---------------------------------------------------------------- M6-7.1 schema 0.2 / M7-8.1 0.3 / M8 0.4 / M9 0.5
 
-def test_new_project_schema_version_040() -> None:
-    """M8：新项目 schema_version = 0.4，pipeline 含 animate 节点。"""
-    project = Project(project_id="proj_m8")
-    assert project.schema_version == "0.4"
+def test_new_project_schema_version_050() -> None:
+    """M9：新项目 schema_version = 0.5，pipeline 含 animate 节点。"""
+    project = Project(project_id="proj_m9")
+    assert project.schema_version == "0.5"
     assert list(project.pipeline) == ["direct", "confirm", "gen_assets", "animate", "timeline", "export"]
 
 
@@ -92,6 +92,8 @@ def test_legacy_json_loads_with_new_defaults() -> None:
     assert s.sfx_asset_id is None                  # M8：音效未绑定
     assert project.timeline.sfx == []              # M8：音效轨为空
     assert project.config.beat_sync is False       # M8：卡点对齐默认关
+    assert s.transition == "auto"                  # M9：止损转场默认 auto
+    assert project.timeline.video == []            # M9：未组装时间线（VideoClip.transition 默认 none 见 m9 测试）
 
 
 def test_motion_plan_roundtrip() -> None:

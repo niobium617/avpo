@@ -8,7 +8,10 @@
   pan_* 降级为无动画（无入场动画枚举），M7 解除该限制。参数取自
   scene.motion_plan（animate 节点解析落盘）；旧项目没跑 animate 时按
   scene.motion 兜底解析（app/core/motion.py 与 animate 同源）。首尾帧尾拍
-  （motion=none 的 clip）按通用视频轨导出，不加任何动画（转场属 M9）。
+  （motion=none 的 clip）按通用视频轨导出，不加任何动画。
+- M9 止损转场：clip.transition（timeline 组装解析 scene.transition）映射
+  TransitionType（闪白/震动），固定 0.3s（_TRANSITION_MS）；转场加在前一段上、
+  轨道时长不变；草稿 JSON 落地为 materials.transitions + 段级 extra_material_refs。
 - M2-3.2 扩展：字幕样式（字号/居中/描边/低位）、配音段淡入淡出、草稿元信息
   （draft_name/tm_duration）。封面由剪映取首帧自动生成 —— 首段从 0 起即首图。
 - M8 音频：sfx 音效轨（timeline.sfx，切点音效短促不加淡入淡出）+ BGM 来源解耦
@@ -31,6 +34,7 @@ from pyJianYingDraft import (  # noqa: N999 —— 包名本身大写
     TextStyle,
     TrackSpec,
     TrackType,
+    TransitionType,
     VideoSegment,
     trange,
 )
@@ -53,6 +57,13 @@ _MATERIALS_DIR = "materials"
 _FADE_MS = 300
 # BGM 尾部淡出 1s（音乐结尾不突兀）
 _BGM_FADE_OUT_MS = 1000
+# M9 止损转场：固定 0.3s（路线图定值，单点可调）；闪白 = 非叠加（切点处播放），
+# 震动 = 叠加（剪映原生元数据，编辑器自处理相邻 clip 的叠化窗口）
+_TRANSITION_MS = 300
+_TRANSITION_TYPES = {
+    "flash_white": TransitionType.闪白,
+    "shake": TransitionType.震动,
+}
 
 
 def export(
@@ -135,6 +146,12 @@ def export(
         if plan is None and scene is not None and clip.motion != "none":
             plan = resolve_motion_plan(scene)   # 旧项目兜底：没跑 animate 也按 motion 出运镜
         _apply_motion_plan(segment, plan, clip.duration_ms)
+        # M9 止损转场：clip.transition（timeline 组装解析）映射剪映转场，固定 0.3s；
+        # 转场加在前一段上（库语义），轨道时长不变
+        if clip.transition in _TRANSITION_TYPES:
+            segment.add_transition(
+                _TRANSITION_TYPES[clip.transition], duration=_TRANSITION_MS * 1000,
+            )
         draft.add_segment(segment, _TRACK_VIDEO)
 
     # 音频轨：时长优先级 clip.duration_ms（时间线组装写入）> voiceover.duration_ms
