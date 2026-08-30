@@ -123,10 +123,10 @@ def test_save_serialized_across_threads(store: ProjectStore, sample_project: Pro
     assert loaded.project_id == "proj_001"
 
 
-# ---- M7-8.3 / M8 / M9 升版 shim（0.1/0.2 → 0.5）----
+# ---- M7-8.3 / M8 / M9 / M10 升版 shim（0.1/0.2 → 0.6）----
 
-def test_load_legacy_v01_json_reports_050_in_memory(store: ProjectStore) -> None:
-    """手写 v0.1 JSON（无任何 M6/M7/M8/M9 键）：加载成功，内存版本升 0.5，文件不变。"""
+def test_load_legacy_v01_json_reports_060_in_memory(store: ProjectStore) -> None:
+    """手写 v0.1 JSON（无任何 M6/M7/M8/M9/M10 键）：加载成功，内存版本升 0.6，文件不变。"""
     legacy = (
         '{"project_id": "old", "schema_version": "0.1", "title": "旧项目",'
         ' "pipeline": {"direct": "pending", "confirm": "pending", "gen_assets": "pending",'
@@ -136,19 +136,21 @@ def test_load_legacy_v01_json_reports_050_in_memory(store: ProjectStore) -> None
     store.json_path("old").write_text(legacy, encoding="utf-8")
 
     loaded = store.load("old")
-    assert loaded.schema_version == "0.5"           # 内存升版
-    assert loaded.pipeline["animate"] == "pending"  # 旧 5 节点 pipeline 补新键
+    assert loaded.schema_version == "0.6"           # 内存升版
+    assert loaded.pipeline["animate"] == "pending"  # 旧 5 节点 pipeline 补新键（M7）
+    assert loaded.pipeline["transcribe"] == "pending"   # M10 新节点补键
     assert loaded.brief is None                     # 新字段默认
     assert loaded.config.beat_sync is False         # M8 新字段默认
+    assert loaded.config.whisper_model == "small"   # M10 新字段默认
     assert loaded.timeline.sfx == []
     assert "0.1" in store.json_path("old").read_text(encoding="utf-8")   # 文件未迁移
 
 
-def test_save_persists_050(store: ProjectStore, sample_project: Project) -> None:
-    """升版后的项目 save 时持久化 0.5。"""
+def test_save_persists_060(store: ProjectStore, sample_project: Project) -> None:
+    """升版后的项目 save 时持久化 0.6。"""
     sample_project.schema_version = "0.1"
     store.create(sample_project)
     loaded = store.load("proj_001")
-    assert loaded.schema_version == "0.5"
+    assert loaded.schema_version == "0.6"
     store.save(loaded, message="升版")
-    assert '"0.5"' in store.json_path("proj_001").read_text(encoding="utf-8")
+    assert '"0.6"' in store.json_path("proj_001").read_text(encoding="utf-8")

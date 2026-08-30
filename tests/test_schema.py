@@ -51,7 +51,9 @@ def test_unknown_pipeline_node_rejected(sample_project: Project) -> None:
 
 def test_new_project_has_all_pipeline_nodes() -> None:
     project = Project(project_id="proj_x")
-    assert list(project.pipeline) == ["direct", "confirm", "gen_assets", "animate", "timeline", "export"]
+    assert list(project.pipeline) == [
+        "direct", "confirm", "gen_assets", "transcribe", "animate", "timeline", "export",
+    ]
     assert all(v == "pending" for v in project.pipeline.values())
 
 
@@ -61,13 +63,18 @@ def test_status_assignment_validated(sample_project: Project) -> None:
         sample_project.scenes[0].status = "finished"  # type: ignore[assignment]
 
 
-# ---------------------------------------------------------------- M6-7.1 schema 0.2 / M7-8.1 0.3 / M8 0.4 / M9 0.5
+# ---------------------------------------------------------------- M6-7.1 schema 0.2 / M7-8.1 0.3 / M8 0.4 / M9 0.5 / M10 0.6
 
-def test_new_project_schema_version_050() -> None:
-    """M9：新项目 schema_version = 0.5，pipeline 含 animate 节点。"""
-    project = Project(project_id="proj_m9")
-    assert project.schema_version == "0.5"
-    assert list(project.pipeline) == ["direct", "confirm", "gen_assets", "animate", "timeline", "export"]
+def test_new_project_schema_version_060() -> None:
+    """M10：新项目 schema_version = 0.6，pipeline 含 transcribe + animate 节点。"""
+    project = Project(project_id="proj_m10")
+    assert project.schema_version == "0.6"
+    assert list(project.pipeline) == [
+        "direct", "confirm", "gen_assets", "transcribe", "animate", "timeline", "export",
+    ]
+    assert project.config.whisper_model == "small"
+    assert project.config.whisper_language == "zh"
+    assert project.scenes == []
 
 
 def test_legacy_json_loads_with_new_defaults() -> None:

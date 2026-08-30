@@ -3,6 +3,10 @@
 run_direct：     direct 节点 —— 文案 → 分镜（Director 强制 JSON），校验后写 project.scenes。
 run_gen_assets： gen_assets 节点 —— 每个场景：配音段（TTS + word 时间戳）→ 字幕聚合
                 → 生图（带 prompt_hash 缓存），全部产物入 assets/，场景标记 done。
+                M10：自带音频（user_audio_asset_id）场景跳过 TTS 配音与字幕（该场景
+                字幕由 transcribe 节点产出并保留）。
+run_transcribe： transcribe 节点（M10）—— 自带音频场景本地转写（faster-whisper），
+                字幕落盘 + sidecar 缓存（音频哈希/模型/语言三键校验）。
 run_timeline：   timeline 节点 —— 逐场景素材组装全局时间轴（M2-3.1）。
 run_export：     export 节点 —— project → 剪映草稿目录（M2-3.2），写 project.export。
 
@@ -28,11 +32,12 @@ import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from app.audio import whisper
 from app.core.motion import resolve_motion_plan
 from app.core.progress import ProgressCallback, ProgressEvent
 from app.core.project import ProjectStore
-from app.core.schema import PIPELINE_NODES, Asset, Project, Scene
-from app.core.state import FatalError, run_task
+from app.core.schema import PIPELINE_NODES, Asset, Project, Scene, Subtitle
+from app.core.state import FatalError, TransientError, run_task
 from app.core.styles import StyleTemplate, compose_image_prompt, load_style
 from app.director.director import Director
 from app.export.jianying import export as export_draft
@@ -99,16 +104,20 @@ def run_gen_assets(
     def fn(p: Project) -> None:
         cache = ImageCache(store.project_dir(p.project_id))
         image.cache = cache                     # 管线持有缓存生命周期（每个项目一份）
-        p.subtitles = []                        # 整体重建 → fn 可重入，重试不叠加
-        # 阶段 1：配音 + 字幕（顺序执行，场景间留间隔防 edge-tts 瞬态限流）
-        for i, scene in enumerate(p.scenes):
+        # M10：自带音频场景的字幕由 transcribe 产出，重建时保留；其余整体重建
+        user_audio_ids = {s.scene_id for s in p.scenes if s.user_audio_asset_id}
+        p.subtitles = [s for s in p.subtitles if s.scene_id in user_audio_ids]
+        # 阶段 1：配音 + 字幕（顺序执行，场景间留间隔防 edge-tts 瞬态限流；
+        # M10 自带音频场景跳过 —— 配音/字幕来自用户录音与 transcribe）
+        voiced = [s for s in p.scenes if s.scene_id not in user_audio_ids]
+        for i, scene in enumerate(voiced):
             if i:
                 time.sleep(_TTS_GAP_S)
             _gen_scene_voice(store, p, scene, tts)
             if progress:
                 progress(ProgressEvent(
-                    "gen_assets", f"配音+字幕 {i + 1}/{len(p.scenes)}（{scene.scene_id}）",
-                    0.45 * (i + 1) / len(p.scenes),
+                    "gen_assets", f"配音+字幕 {i + 1}/{len(voiced)}（{scene.scene_id}）",
+                    0.45 * (i + 1) / len(voiced),
                 ))
         # 阶段 2：并发生成候选图（M6-7.5：每场景 N 张；慢操作按场景并行，缓存命中 0 API 调用）
         if p.scenes:
@@ -238,6 +247,74 @@ def _gen_scene_candidates(
     scene.image_asset_id = scene.image_asset_id if scene.image_asset_id in keep else f"{base}_v1"
     scene.cost["image"] = cost
     scene.status = "done"
+
+
+def run_transcribe(
+    store: ProjectStore, project: Project, progress: ProgressCallback | None = None,
+) -> bool:
+    """transcribe 节点（M10）：用户自带音频 → 本地转写（faster-whisper）→ 字幕落盘。
+
+    逐场景：有 user_audio_asset_id 才转写（模型懒加载单例，进程内共享）；sidecar
+    缓存（音频 sha256 + 模型 + 语言三键）命中即跳过推理 —— 断点续跑语义与 TTS
+    一致；该场景字幕整体替换（重跑幂等）。未检出语音 = FatalError（大概率放错
+    文件，不静默产出空字幕）。无自带音频场景 → 节点空转 done（下游失效）。
+    """
+    def fn(p: Project) -> None:
+        target = [s for s in p.scenes if s.user_audio_asset_id]
+        assets_dir = store.project_dir(p.project_id) / "assets"
+        download_root = whisper.model_cache_dir(store.data_dir)
+        for i, scene in enumerate(target):
+            if progress:
+                progress(ProgressEvent(
+                    "transcribe", f"本地转写 {i + 1}/{len(target)}（{scene.scene_id}）",
+                    i / len(target),
+                ))
+            asset = p.assets.get(scene.user_audio_asset_id or "")
+            if asset is None or asset.type != "audio":
+                raise FatalError(
+                    f"scene {scene.scene_id} 自带音频资产缺失",
+                    hint="重新上传音频",
+                )
+            audio_path = store.project_dir(p.project_id) / asset.path
+            if not audio_path.is_file():
+                raise FatalError(f"自带音频文件缺失: {audio_path}", hint="重新上传音频")
+            model = p.config.whisper_model
+            language = p.config.whisper_language
+            audio_hash = whisper.audio_sha256(audio_path)
+            segments = whisper.load_whisper_cache(
+                assets_dir, scene.scene_id, audio_hash, model, language,
+            )
+            if segments is None:
+                try:
+                    segments = whisper.transcribe_audio(audio_path, model, language, download_root)
+                except whisper.WhisperModelError as exc:
+                    raise TransientError(
+                        f"{exc}（重试中）",
+                        hint="检查网络（首次转写需下载模型），可设 HF_ENDPOINT=https://hf-mirror.com 走镜像",
+                    ) from exc
+                except whisper.WhisperDecodeError as exc:
+                    raise FatalError(str(exc), hint="更换有效音频文件（mp3/wav/m4a）后重新上传") from exc
+                if not segments:
+                    raise FatalError(
+                        f"scene {scene.scene_id} 未检出语音（音频可能为静音或非人声）",
+                        hint="重新录制/更换音频后重新上传",
+                    )
+                whisper.save_whisper_cache(assets_dir, scene.scene_id, audio_hash, model, language, segments)
+            # 该场景字幕整体替换（重跑幂等；无旧字幕时追加尾部，导出按时间戳定位不依赖顺序）
+            p.subtitles = [s for s in p.subtitles if s.scene_id != scene.scene_id]
+            p.subtitles.extend(
+                Subtitle(scene_id=scene.scene_id, start_ms=seg.start_ms, end_ms=seg.end_ms, text=seg.text)
+                for seg in segments
+            )
+        if progress:
+            progress(ProgressEvent(
+                "transcribe",
+                f"转写完成（{len(target)} 场景）" if target else "无自带音频场景，跳过",
+                1.0,
+            ))
+        _invalidate_downstream(p, "transcribe")
+
+    return run_task(store, project, "transcribe", fn)
 
 
 def run_animate(

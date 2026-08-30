@@ -24,6 +24,7 @@ import streamlit as st
 from pathlib import Path
 
 from app.audio import beats
+from app.audio.whisper import WHISPER_MODELS
 from app.core import edits, env, errors, pipeline, providers, styles
 from app.web import tasks
 from app.core.cost import DEFAULT_BUDGET, summarize
@@ -318,6 +319,31 @@ def _render_brief(store: ProjectStore, project: Project) -> None:
             st.rerun()
 
     st.divider()
+    st.subheader("本地字幕（M10 Whisper）")
+    st.caption(
+        "分镜页上传「自带音频」的场景由本地 whisper 转写字幕（替代 TTS 配音与文案字幕）。"
+        "模型首次使用需联网下载（缓存于数据目录 whisper_models/，可用 AVPO_WHISPER_CACHE/HF_ENDPOINT 配置）。"
+    )
+    w1, w2 = st.columns(2)
+    wmodel = w1.selectbox(
+        "whisper 模型", list(WHISPER_MODELS),
+        index=list(WHISPER_MODELS).index(project.config.whisper_model),
+        key=f"wmodel_{pid}", disabled=busy,
+        help="越大越准越慢；small 为中文口播平衡点",
+    )
+    wlang = w2.text_input(
+        "转写语言", value=project.config.whisper_language, key=f"wlang_{pid}", disabled=busy,
+        help="如 zh/ja/en；留空 = whisper 自动检测",
+    )
+    if wmodel != project.config.whisper_model or wlang != project.config.whisper_language:
+        try:
+            edits.set_whisper_config(store, project, wmodel, wlang)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
+
+    st.divider()
     st.subheader("音效库（场景切点音效）")
     st.caption("上传 mp3/wav 音效入库（assets/sfx/），到「分镜确认」页给场景绑定切点音效（M8）。")
     sfx_assets = sorted(
@@ -459,16 +485,18 @@ def _render_pipeline(store: ProjectStore, project: Project) -> None:
         )
 
     st.divider()
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     if c1.button("运行 direct", key=f"run_direct_{pid}", disabled=busy):
         _start_node(store, project, "direct", text=text)
     if c2.button("运行 gen_assets", key=f"run_gen_{pid}", disabled=busy):
         _start_node(store, project, "gen_assets")
-    if c3.button("运行 timeline", key=f"run_tl_{pid}", disabled=busy):
+    if c3.button("运行 transcribe", key=f"run_tsc_{pid}", disabled=busy):
+        _start_node(store, project, "transcribe")
+    if c4.button("运行 timeline", key=f"run_tl_{pid}", disabled=busy):
         _start_node(store, project, "timeline")
-    if c4.button("运行 export", key=f"run_exp_{pid}", disabled=busy):
+    if c5.button("运行 export", key=f"run_exp_{pid}", disabled=busy):
         _start_node(store, project, "export")
-    c5.caption("confirm 在「分镜确认」页")
+    c6.caption("confirm 在「分镜确认」页")
     with st.expander("自动模式（高级）"):          # M6-7.9 人审优先：全链路降级为高级选项
         st.caption(
             "一键全链路跳过人工确认与逐镜选图（候选默认用 v1）。"
@@ -633,6 +661,41 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
                     st.error(str(exc))
                 else:
                     st.rerun()
+            # M10 自带音频：创作者录音替代 TTS 配音，经本地 Whisper 转写字幕
+            if s.user_audio_asset_id:
+                audio_asset = project.assets.get(s.user_audio_asset_id)
+                st.caption(f"自带音频: {audio_asset.path if audio_asset else '-'}（替代 TTS 配音）")
+                if st.button("移除自带音频", key=f"rmua_{pid}_{s.scene_id}", disabled=busy,
+                             help="移除后回到 TTS 配音，gen_assets 起重跑"):
+                    try:
+                        edits.remove_user_audio(store, project, s.scene_id)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.rerun()
+            else:
+                st.caption("可上传自己的录音（mp3/wav/m4a）替代 TTS 配音，本地 Whisper 转写为字幕")
+                ua_up = st.file_uploader(
+                    "上传自带音频", type=["mp3", "wav", "m4a"],
+                    key=f"uaup_{pid}_{s.scene_id}", disabled=busy,
+                )
+                if ua_up is not None:
+                    # 上传临时文件写项目目录，处理完即删（data/ 本地 git 不上推）
+                    tmp = store.project_dir(pid) / (".tmp_ua_upload" + (Path(ua_up.name).suffix or ".mp3"))
+                    tmp.write_bytes(ua_up.getbuffer())
+                    try:
+                        edits.add_user_audio(store, project, s.scene_id, tmp)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.session_state.pop(f"uaup_{pid}_{s.scene_id}", None)
+                        st.success("自带音频已上传：请到「流水线」页运行 transcribe 生成字幕")
+                        st.rerun()
+                    finally:
+                        tmp.unlink(missing_ok=True)
+            scene_subs = [sub.text for sub in project.subtitles if sub.scene_id == s.scene_id]
+            if scene_subs:
+                st.caption("转写字幕: " + " / ".join(scene_subs)[:120])
             st.caption(f"status={s.status}  start={s.start_ms}ms  cost={s.cost}")
 
             _render_candidate_gallery(store, project, s, pid, busy)

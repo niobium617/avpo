@@ -21,7 +21,7 @@ from app.core import edits
 from app.core.progress import ProgressEvent
 from app.core.project import ProjectStore
 from app.core.providers import ImageCapabilities
-from app.core.schema import Asset, PipelineError, Project, Scene
+from app.core.schema import Asset, PipelineError, Project, Scene, Subtitle
 
 APP = Path(__file__).resolve().parents[1] / "app" / "web" / "app.py"
 
@@ -76,6 +76,7 @@ def _mock_pipeline(monkeypatch) -> list[str]:
 
     monkeypatch.setattr("app.core.pipeline.run_direct", rec("direct"))
     monkeypatch.setattr("app.core.pipeline.run_gen_assets", rec("gen_assets"))
+    monkeypatch.setattr("app.core.pipeline.run_transcribe", rec("transcribe"))
     monkeypatch.setattr("app.core.pipeline.run_animate", rec("animate"))
     monkeypatch.setattr("app.core.pipeline.run_timeline", rec("timeline"))
     monkeypatch.setattr("app.core.pipeline.run_export", rec("export"))
@@ -168,7 +169,7 @@ def test_run_all_calls_nodes_in_order(at: AppTest, monkeypatch) -> None:
     at.run()                                                    # fragment 消费任务 + 刷新
 
     assert not at.exception
-    assert calls == ["gen_assets", "animate", "timeline", "export"]
+    assert calls == ["gen_assets", "transcribe", "animate", "timeline", "export"]
     # 全链路后 pipeline 全 done（节点 mock 落盘 + rerun 后徽章状态）
     loaded = _store().load("proj_ui")
     assert all(v == "done" for v in loaded.pipeline.values())
@@ -770,7 +771,7 @@ def test_run_all_moved_into_advanced_expander(at: AppTest, monkeypatch) -> None:
     at.run()
 
     assert not at.exception
-    assert calls == ["gen_assets", "animate", "timeline", "export"]
+    assert calls == ["gen_assets", "transcribe", "animate", "timeline", "export"]
     assert _ss(at, "task") is None
 
 
@@ -890,3 +891,83 @@ def test_storyboard_transition_selectbox_binds_scene(at: AppTest) -> None:
     assert loaded.scenes[0].transition == "flash_white"
     assert loaded.pipeline["timeline"] == "pending"
     assert loaded.pipeline["animate"] == "done"                 # 运镜/尾拍上游不动
+
+
+# ---------------------------------------------------------------- 页面 2/3：M10 本地字幕
+
+def test_brief_page_whisper_config_selectbox_binds(at: AppTest) -> None:
+    """策划页（M10）：whisper 模型 selectbox + 语言输入存在，改模型即落盘（transcribe 起重跑）。"""
+    _mk_project()
+    at.run()
+    _goto(at, "策划", pid="proj_ui")
+
+    assert not at.exception
+    model_sel = at.selectbox(key="wmodel_proj_ui")
+    assert model_sel is not None
+    assert model_sel.value == "small"                            # 默认模型
+
+    model_sel.set_value("base")
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.config.whisper_model == "base"
+    assert loaded.pipeline["transcribe"] == "pending"
+    assert loaded.pipeline["gen_assets"] == "pending"            # 新项目默认 pending，上游未被重置
+
+
+def test_brief_page_whisper_language_input_binds(at: AppTest) -> None:
+    """策划页（M10）：转写语言输入留空 = 自动检测。"""
+    _mk_project()
+    at.run()
+    _goto(at, "策划", pid="proj_ui")
+
+    at.text_input(key="wlang_proj_ui").set_value("")
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.config.whisper_language == ""
+
+
+def test_storyboard_user_audio_bound_shows_remove_and_preview(at: AppTest) -> None:
+    """分镜页（M10）：已绑自带音频 → 移除按钮 + 转写字幕预览；点击移除解绑（gen_assets 起重跑）。"""
+    _mk_project(scenes=SCENES)
+    store = _store()
+    project = store.load("proj_ui")
+    project.scenes[0].user_audio_asset_id = "user_audio_s1"
+    project.assets["user_audio_s1"] = Asset(type="audio", path="assets/user_audio/s1.mp3", status="done")
+    project.subtitles = [Subtitle(scene_id="s1", start_ms=0, end_ms=900, text="第一句。")]
+    project.pipeline = {n: "done" for n in project.pipeline}
+    store.save(project, message="web 测试补自带音频")
+    (store.project_dir("proj_ui") / "assets" / "user_audio").mkdir(parents=True)
+    (store.project_dir("proj_ui") / "assets" / "user_audio" / "s1.mp3").write_bytes(b"mp3")
+
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    assert not at.exception
+    assert at.button(key="rmua_proj_ui_s1")                     # 移除按钮
+    assert any("转写字幕" in c.value for c in at.caption)        # whisper 字幕预览
+    ua_keys = [f.key for f in at.get("file_uploader")]
+    assert "uaup_proj_ui_s1" not in ua_keys                     # 已绑定不显示上传器
+
+    at.button(key="rmua_proj_ui_s1").click()
+    at.run()
+
+    assert not at.exception
+    loaded = _store().load("proj_ui")
+    assert loaded.scenes[0].user_audio_asset_id is None
+    assert "user_audio_s1" not in loaded.assets
+    assert loaded.pipeline["gen_assets"] == "pending"           # TTS 配音/字幕重建
+
+
+def test_storyboard_user_audio_uploader_when_unbound(at: AppTest) -> None:
+    """分镜页（M10）：未绑定场景显示自带音频上传器（mp3/wav/m4a）。"""
+    _mk_project(scenes=SCENES)
+    at.run()
+    _goto(at, "分镜确认", pid="proj_ui")
+
+    assert not at.exception
+    uploader = at.file_uploader(key="uaup_proj_ui_s1")
+    assert uploader is not None

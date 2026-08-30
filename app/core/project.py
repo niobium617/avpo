@@ -54,6 +54,10 @@ class ProjectStore:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         if not (self.data_dir / ".git").exists():
             self._git("init")
+        # .gitignore（仅缺失时写，不覆盖用户已有）：模型权重/streamlit 缓存不进版本历史
+        gi = self.data_dir / ".gitignore"
+        if not gi.is_file():
+            gi.write_text("whisper_models/\nwebhome/\n", encoding="utf-8")
         # 身份只配仓库级，不动用户全局（C 盘）配置
         if not self._git("config", "--get", "user.name", check=False).strip():
             self._git("config", "user.name", "avpo")
@@ -112,14 +116,17 @@ class ProjectStore:
           默认值字段，pydantic 直接填充，无需补键）；
         - M9：schema 0.4 → 0.5（Scene.transition/VideoClip.transition 均为
           默认值字段 —— 旧项目加载后 Scene.transition="auto"，跑 timeline 即
-          获得止损转场默认，无需补键）。
+          获得止损转场默认，无需补键）；
+        - M10：schema 0.5 → 0.6（Scene.user_audio_asset_id/config.whisper_* 均为
+          默认值字段；旧项目 pipeline 缺 transcribe 键，由下方按 PIPELINE_NODES
+          顺序重建补上）。
         """
         path = self.json_path(project_id)
         if not path.is_file():
             raise FileNotFoundError(f"项目不存在: {project_id}（{path}）")
         project = Project.model_validate_json(path.read_text(encoding="utf-8"))
-        if project.schema_version in ("0.1", "0.2", "0.3", "0.4"):
-            project.schema_version = "0.5"
+        if project.schema_version in ("0.1", "0.2", "0.3", "0.4", "0.5"):
+            project.schema_version = "0.6"
         project.pipeline = {node: project.pipeline.get(node, "pending") for node in PIPELINE_NODES}
         return project
 

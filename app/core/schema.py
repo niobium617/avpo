@@ -16,6 +16,8 @@ MotionKind = Literal["zoom_in_slow", "zoom_out", "pan_left", "pan_right", "none"
 # M9 止损转场：Scene.transition 取值。auto = 无结束帧的切点自动闪白（止损默认），
 # 显式 none/flash_white/shake 为创作者逐镜覆盖（VideoClip 上的已解析值不含 auto）
 TransitionKind = Literal["auto", "none", "flash_white", "shake"]
+# M10 本地字幕：faster-whisper 模型尺寸（越大越准越慢，首次使用需下载模型）
+WhisperModelKind = Literal["tiny", "base", "small", "medium", "large-v3"]
 AssetKind = Literal["image", "audio", "video"]
 # 景别（M6 阶段一：分镜脚本标注）
 ShotSize = Literal["远景", "全景", "中景", "近景", "特写", "空镜", ""]
@@ -23,8 +25,10 @@ ShotSize = Literal["远景", "全景", "中景", "近景", "特写", "空镜", "
 ProviderKind = Literal["siliconflow", "dashscope"]
 
 # 编排层状态机节点（IMPLEMENTATION_PLAN §5；M7-8.1 增 animate —— 运镜/首尾帧动态化，
-# 夹在 gen_assets 与 timeline 之间：动画计划先解析落盘，时间线才组装尾拍）
-PIPELINE_NODES = ("direct", "confirm", "gen_assets", "animate", "timeline", "export")
+# 夹在 gen_assets 与 timeline 之间：动画计划先解析落盘，时间线才组装尾拍；
+# M10 增 transcribe —— 用户自带音频本地转写字幕，夹在 gen_assets 与 animate 之间：
+# 绑定/解绑自带音频只失效 transcribe 起，gen_assets（TTS/生图）不动）
+PIPELINE_NODES = ("direct", "confirm", "gen_assets", "transcribe", "animate", "timeline", "export")
 
 
 class StrictModel(BaseModel):
@@ -62,6 +66,9 @@ class ProjectConfig(StrictModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     style: str = "default"   # M3-4.4 风格模板 id（templates/，default = MVP 固定样式）
     beat_sync: bool = False  # M8：BGM 卡点对齐（timeline 组装时场景切换点 snap 到最近节拍）
+    # M10 本地字幕：whisper 模型尺寸与转写语言（"" = 自动检测；中文项目默认 zh）
+    whisper_model: WhisperModelKind = "small"
+    whisper_language: str = "zh"
 
 
 # ---------------------------------------------------------------- 内容
@@ -125,6 +132,8 @@ class Scene(StrictModel):
     节奏）、sfx 音效描述、image_candidates 候选图资产 id 列表（人审选中的
     image_asset_id 供时间线使用）、end_image_asset_id 为 M7「首尾帧」预埋字段。
     M9 扩展：transition 切点转场（auto 止损默认，见 TransitionKind）。
+    M10 扩展：user_audio_asset_id 用户自带音频（创作者自己的录音替代 TTS 配音，
+    经 transcribe 节点本地转写为字幕；None = 用 TTS 配音）。
     """
 
     scene_id: str
@@ -141,6 +150,7 @@ class Scene(StrictModel):
     sfx: str = ""               # 音效描述（文本，供创作者标注；实际素材经 sfx_asset_id 引用）
     sfx_asset_id: str | None = None   # M8：场景起点音效素材（assets/sfx/ 注册的 audio 资产；None = 无）
     transition: TransitionKind = "auto"   # M9 止损转场：进入下一镜的切点转场（auto = 无结束帧自动闪白）
+    user_audio_asset_id: str | None = None   # M10：场景自带音频（audio 资产，转写为字幕并替代 TTS 配音；None = TTS）
     start_ms: int = 0           # 时间线全局起点（app/timeline/builder.py 组装时写入）
     status: TaskStatus = "pending"
     cost: dict[str, float] = Field(default_factory=dict)   # 如 {"image": 0.02, "llm": 0.001}
@@ -226,7 +236,7 @@ class PipelineError(StrictModel):
 class Project(StrictModel):
     project_id: str
     title: str = ""
-    schema_version: str = "0.5"   # M9：0.4 → 0.5（增量字段，旧 JSON 直接加载，load 时内存升版）
+    schema_version: str = "0.6"   # M10：0.5 → 0.6（增量字段，旧 JSON 直接加载，load 时内存升版）
     config: ProjectConfig = Field(default_factory=ProjectConfig)
     brief: Brief | None = None    # M6-7.1 阶段一策划简报（None = 旧项目/未策划）
     reference_images: list[ReferenceImage] = Field(default_factory=list)   # M6-7.1 参考图组
@@ -297,6 +307,14 @@ class Project(StrictModel):
             if scene.sfx_asset_id and scene.sfx_asset_id not in asset_ids:
                 raise ValueError(
                     f"scene {scene.scene_id} 的音效引用了不存在的 asset_id: {scene.sfx_asset_id}"
+                )
+            if scene.user_audio_asset_id and scene.user_audio_asset_id not in asset_ids:
+                raise ValueError(
+                    f"scene {scene.scene_id} 的自带音频引用了不存在的 asset_id: {scene.user_audio_asset_id}"
+                )
+            if scene.user_audio_asset_id and self.assets[scene.user_audio_asset_id].type != "audio":
+                raise ValueError(
+                    f"scene {scene.scene_id} 的自带音频引用了非 audio 资产: {scene.user_audio_asset_id}"
                 )
 
         # 参考图 id 唯一

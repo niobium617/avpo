@@ -25,6 +25,7 @@ from app.core.env import DEFAULT_DATA_DIR, PROJECT_ROOT, load_project_env as _lo
 from app.core.errors import describe_list
 from app.core.pipeline import (
     run_animate, run_confirm, run_direct, run_export, run_gen_assets, run_timeline,
+    run_transcribe,
 )
 from app.core.project import ProjectStore
 from app.core.providers import config_for_provider, make_director, make_image
@@ -106,7 +107,9 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
 
         root.add(
             f"[cyan]config[/cyan]  style={project.config.style}  "
-            f"beat_sync={project.config.beat_sync}（M8 BGM 卡点对齐）"
+            f"beat_sync={project.config.beat_sync}（M8 BGM 卡点对齐）  "
+            f"whisper={project.config.whisper_model}/"
+            f"{project.config.whisper_language or '自动'}（M10 本地字幕）"
         )
 
         scenes = root.add(f"[cyan]scenes[/cyan] ({len(project.scenes)})")
@@ -114,7 +117,8 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             scenes.add(
                 f"{s.scene_id}  [{_style(s.status)}]{s.status}[/{_style(s.status)}]  "
                 f"motion={s.motion}  img={s.image_asset_id or '-'}  "
-                f"sfx={s.sfx_asset_id or '-'}  trans={s.transition}  文案 {len(s.narration)} 字"
+                f"sfx={s.sfx_asset_id or '-'}  trans={s.transition}  "
+                f"audio={s.user_audio_asset_id or 'TTS'}  文案 {len(s.narration)} 字"
             )
 
         vo = root.add("[cyan]voiceover[/cyan]")
@@ -194,6 +198,25 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             raise typer.Exit(code=1)
 
     @app.command()
+    def transcribe(
+        project_id: str = typer.Argument(..., help="项目 ID"),
+    ) -> None:
+        """transcribe 节点（M10）：自带音频场景本地转写（faster-whisper）→ 字幕落盘。
+
+        首次使用需联网下载模型（缓存到数据目录 whisper_models/，可用
+        AVPO_WHISPER_CACHE / HF_ENDPOINT 配置镜像）；之后纯本地推理。
+        """
+        store.init_repo()
+        project = _load_project_or_exit(store, project_id)
+
+        if run_transcribe(store, project):
+            n = sum(1 for s in project.scenes if s.user_audio_asset_id)
+            console.print(f"[green]transcribe 完成[/green] {n} 个自带音频场景字幕落盘")
+        else:
+            console.print(f"[red]transcribe 失败[/red] {describe_list(project.errors)}")
+            raise typer.Exit(code=1)
+
+    @app.command()
     def animate(
         project_id: str = typer.Argument(..., help="项目 ID"),
     ) -> None:
@@ -232,7 +255,7 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
             False, "--yes", "-y", help="跳过人工确认（自动/重跑模式，默认建议人工审查）",
         ),
     ) -> None:
-        """一键流水线：direct → confirm → gen_assets → animate → timeline → export。
+        """一键流水线：direct → confirm → gen_assets → transcribe → animate → timeline → export。
 
         已 done 的节点自动跳过（断点续跑）；失败的节点重试。
         M6 人审优先：confirm 节点展示分镜后等 y/n，n 则退出（改文案重跑 direct，
@@ -284,13 +307,19 @@ def create_app(data_dir: Path = DEFAULT_DATA_DIR) -> typer.Typer:
                 _fail("gen_assets")
             times.append(f"gen_assets {time.time() - t0:.1f}s")
 
-        # 4) animate：运镜/首尾帧 → 关键帧计划（本地解析，旧项目首次 run 自动补跑）
+        # 4) transcribe：自带音频本地转写（无自带音频场景时节点空转）
+        t0 = time.time()
+        if not run_transcribe(store, project):
+            _fail("transcribe")
+        times.append(f"transcribe {time.time() - t0:.1f}s")
+
+        # 5) animate：运镜/首尾帧 → 关键帧计划（本地解析，旧项目首次 run 自动补跑）
         t0 = time.time()
         if not run_animate(store, project):
             _fail("animate")
         times.append(f"animate {time.time() - t0:.1f}s")
 
-        # 5) timeline → 6) export
+        # 6) timeline → 7) export
         t0 = time.time()
         if not run_timeline(store, project):
             _fail("timeline")

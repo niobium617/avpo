@@ -2,7 +2,51 @@
 
 > 动态进度跟踪。方案见 `EXECUTION_PLAN.md`，任务拆解见 `IMPLEMENTATION_PLAN.md`。
 
-## 当前状态（2026-08-29）
+## 当前状态（2026-08-30）
+
+**M10 本地字幕 —— 10.1~10.10 全部完成**（351 测试全绿 + 2 live 跳过）
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 10.1 依赖 + schema 0.6 | faster-whisper==1.2.1（pyproject/requirements 钉版）+ `WhisperModelKind`（tiny~large-v3）+ `Scene.user_audio_asset_id` + `ProjectConfig.whisper_model/whisper_language`（默认 small/zh）+ 引用与类型校验 + load shim 0.1~0.5→0.6（纯默认值字段 + pipeline 补 transcribe 键） | ✅ |
+| 10.2 whisper 引擎 | `app/audio/whisper.py`：懒加载单例（进程内同键一次）+ `AVPO_WHISPER_CACHE`/`HF_HOME` 重定向（模型缓存 `<数据目录>/whisper_models`，绝不写 C 盘用户目录）+ 转写错误两类（模型下载/解码）+ sidecar 缓存三键校验（音频 sha256+模型+语言）；data/ 仓库 .gitignore 补 whisper_models/webhome | ✅ |
+| 10.3 edits | add_user_audio（上传即绑定 `user_audio_<sid>`，覆盖语义）/remove_user_audio（解绑+删资产/文件/缓存+清时间线旧 clip，防悬空引用炸 load 校验）/set_whisper_config；失效语义：上传 transcribe 起（gen_assets 不动）、移除 gen_assets 起（TTS 字幕重建）；update_scenes 场景删除顺带清理 user_audio 资产与转写缓存；remove_sfx 同修旧 clip 悬空引用（M8 隐患） | ✅ |
+| 10.4 transcribe 节点 | PIPELINE_NODES 插 transcribe（gen_assets 后 animate 前 —— 上传/移除失效不波及生图）；run_transcribe：逐场景转写→该场景字幕整体替换（幂等）+ 缓存命中 0 推理 + 未检出语音 FatalError + 模型下载 TransientError（网络 hint 含镜像指引）；gen_assets 阶段一跳过自带音频场景并保留其字幕；CLI `avpo transcribe` + run 链第 4 步 | ✅ |
+| 10.5 timeline | 自带音频场景配音 clip = 录音（时长 = mutagen 实际音频，`_audio_duration_ms` 泛化 mp3/wav/m4a）；转写缓存必须有效（未转写/音频已更换 → FatalError 提示先跑 transcribe，字幕与录音不匹配宁可停下） | ✅ |
+| 10.6 导出 | 无新增代码：录音走既有配音轨（300ms 淡入淡出一致），whisper 字幕段走既有字幕通道（样式同风格模板，scene.start_ms 平移）—— 测试断言锁定 | ✅ |
+| 10.7 web | 策划页 Whisper 模型 selectbox + 语言输入即时落盘；分镜页每场景自带音频上传（mp3/wav/m4a）/移除按钮/转写字幕预览；流水线页「运行 transcribe」按钮（徽章 7 节点） | ✅ |
+| 10.8 CLI | status：config 行 whisper=model/lang + 场景行 audio=（自带音频 id 或 TTS）；`avpo transcribe` 命令 + run 链第 4 步 + 流水线描述更新 | ✅ |
+| 10.9 测试 | `tests/test_m10_whisper.py` 30 条（引擎哈希/缓存三键/env 覆盖/懒加载单例/错误分类；schema 引用校验；edits 六函数与失效语义；transcribe 节点跳过/落盘/缓存命中/空结果/下载失败/文件缺失 + gen_assets 跳过保留；timeline 录音替代/未转写守卫/缓存不符/幂等；导出录音轨与字幕）+ web 4 新（策划页模型/语言绑定 + 分镜页移除/上传器）+ 版本断言与节点序断言 6 处改写 0.6 + 全链路调用序断言含 transcribe | ✅ **351 全绿** |
+| 10.10 文档 + 真模验证 | README M10 章 + 工作台表/架构图/目录/里程碑表 + 已知限制（模型下载/段级字幕）；本文件 + 路线图；versions.md schema 0.6 + faster-whisper 1.2.1；**真模验证**：Systran/faster-whisper-small（462MB）下载到 data/whisper_models（git 忽略，get_model 加 local_files_only 离线兜底）→ 真实转写 proj_m1demo 录音文本与原文案逐字一致 → 端到端（老项目副本 shim 0.6 → 上传自带音频 → transcribe → timeline → export 草稿 JSON 校验）通过；剪映 9.7.1 打开验证留待用户（opened_log ⏳） | ✅ |
+
+要点（M10）：
+- **创作者自己的声音优先**：分镜页上传录音即替代该场景 TTS 配音，本地 Whisper
+  转写为字幕 —— 0 API 成本、纯本地推理；字幕是「实际说出的词」（whisper 识别），
+  不是文案脚本 —— 文案与字幕可能不同，这是特性不是 bug（人在环上核对）。
+- **节点位置 = 失效语义**：transcribe 夹在 gen_assets 与 animate 之间 —— 上传/换配置
+  失效 `transcribe` 起（gen_assets/生图不动）；移除失效 `gen_assets` 起（TTS 配音与
+  文案字幕重建，gen_assets 重建时丢弃已解绑场景的 whisper 字幕、保留现绑场景的）。
+- **转写缓存三键**（音频 sha256 + 模型 + 语言）：音频换了/配置变了缓存自动失效；
+  timeline 组装同样校验三键 —— 未转写或音频已更换直接 FatalError（字幕与录音
+  不匹配宁可停下，不做静默兜底）。
+- **下载纪律**：模型下载到 `<数据目录>/whisper_models`（HF_HOME 重定向，禁写 C 盘
+  用户目录；`AVPO_WHISPER_CACHE`/`HF_ENDPOINT` 可配镜像），data/ git 忽略之；
+  `get_model` 网络下载失败后先试 `local_files_only`（缓存完整时离线可用）再报
+  WhisperModelError —— 管线映射 TransientError 重试 ×3（hint 含镜像指引）。
+- **旧项目兼容**：0.1~0.5 加载即内存升版 0.6（新字段全默认值 + pipeline 补
+  transcribe:pending）；旧项目行为不变（无自带音频场景节点空转 done）。
+- **防悬空引用**：移除音频/删除场景时同步清理 timeline 里引用该资产的旧 clip
+  （否则下次 load 的引用校验会炸）—— remove_user_audio/remove_sfx/update_scenes
+  均已覆盖（后两者为 M8/M6 同类隐患的顺手修复）。
+
+### 下一步
+
+- 候选池：工作台多任务并行；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
+- 题材模板积累（templates/）。
+
+---
+
+## M9 止损转场（2026-08-29）—— 8.1~8.8 全部完成
 
 **M9 止损转场 —— 8.1~8.8 全部完成**（317 测试全绿 + 2 live 跳过）
 
@@ -220,10 +264,10 @@ st.progress；按钮防双开；save 线程锁。）
 错误提示（test_errors ✅）全部验证；MVP 可交付使用。
 → ✅ **已达成**（2026-08-22）。**M3 正式关闭。**
 
-## 路线图（2026-08-29 更新）
+## 路线图（2026-08-30 更新）
 
-- 候选池：Whisper 本地字幕（用户自带音频场景）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
-- 题材模板积累（templates/）；工作台多任务并行（当前单会话单任务）。
+- 候选池：工作台多任务并行（当前单会话单任务）；SQLite 迁移；PR/DaVinci XML（优先级低于剪映）；
+- 题材模板积累（templates/）。
 
 ## 钉版记录
 

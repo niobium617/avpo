@@ -13,6 +13,9 @@
 - select_scene_sfx       场景起点音效绑定/解绑（M8）→ timeline 起重跑
 - set_beat_sync          BGM 卡点对齐开关（M8）→ timeline 起重跑
 - set_scene_transition   场景切点转场（M9 止损：auto/无/闪白/震动）→ timeline 起重跑
+- add/remove_user_audio  场景自带音频上传/移除（M10：替代 TTS 配音 + 本地转写字幕）
+  → 上传失效 transcribe 起（gen_assets 不动）；移除失效 gen_assets 起（TTS 字幕重建）
+- set_whisper_config     转写模型/语言配置（M10）→ transcribe 起重跑
 - reroll_scene_candidates 候选图换种子重 roll（人类触发单次）
 - refine_scene_image     图生图精修：选中图作参考 + 同种子 → 新候选 v_{k+1}
 - rewrite_scene          单场景 AI 重写（narration 默认不动，scene_id 保持）
@@ -30,8 +33,9 @@ from app.core.progress import ProgressCallback, ProgressEvent
 from app.core.project import ProjectStore
 from app.core.schema import PIPELINE_NODES, Asset, Brief, Project, ReferenceImage, Scene, TransitionKind
 from app.core.styles import compose_image_prompt, load_style
+from app.audio.whisper import WHISPER_MODELS
 from app.director.director import Director
-from app.timeline.builder import BGM_FILENAME, SFX_DIR
+from app.timeline.builder import BGM_FILENAME, SFX_DIR, USER_AUDIO_DIR
 from app.vision.base import ImageProvider
 from app.vision.cache import ImageCache, prompt_hash
 
@@ -68,14 +72,26 @@ def update_scenes(store: ProjectStore, project: Project, scenes: list[Scene]) ->
     """
     removed = {s.scene_id for s in project.scenes} - {s.scene_id for s in scenes}
     if removed:
-        # 先清引用再赋值：删除场景的字幕 + 资产（vo_* / img_* 及候选/首尾帧）
+        # 先清引用再赋值：删除场景的字幕 + 资产（vo_* / img_* 及候选/首尾帧/
+        # M10 user_audio_*）+ 时间线旧 clip（已组装时防悬空引用炸下次 load 校验）
         project.subtitles = [s for s in project.subtitles if s.scene_id not in removed]
+        removed_assets: set[str] = set()
         for sid in removed:
             for cid in list(project.assets):
-                if cid == f"vo_{sid}" or cid.startswith(f"img_{sid}_"):
+                if cid in (f"vo_{sid}", f"user_audio_{sid}") or cid.startswith(f"img_{sid}_"):
                     asset = project.assets.pop(cid, None)
                     if asset:
+                        removed_assets.add(cid)
                         (store.project_dir(project.project_id) / asset.path).unlink(missing_ok=True)
+            # M10：转写缓存一并清理
+            (store.project_dir(project.project_id) / "assets" / f"whisper_{sid}.json").unlink(missing_ok=True)
+        project.timeline.video = [
+            c for c in project.timeline.video
+            if c.scene_id not in removed and c.asset_id not in removed_assets
+        ]
+        project.timeline.voiceover = [
+            c for c in project.timeline.voiceover if c.asset_id not in removed_assets
+        ]
     project.scenes = scenes
     _invalidate_downstream(project, "direct")
     store.save(project, message=f"{project.project_id}: 分镜人工修改")
@@ -225,13 +241,15 @@ def add_sfx(store: ProjectStore, project: Project, path: Path) -> Project:
 
 
 def remove_sfx(store: ProjectStore, project: Project, sfx_asset_id: str) -> Project:
-    """删除音效素材：清场景引用（防悬空引用炸校验）+ 删资产与文件。timeline 起重跑。"""
+    """删除音效素材：清场景引用 + 时间线音效轨旧 clip（防悬空引用炸校验）+
+    删资产与文件。timeline 起重跑。"""
     asset = project.assets.get(sfx_asset_id)
     if asset is None or not sfx_asset_id.startswith("sfx_"):
         raise ValueError(f"音效资产不存在: {sfx_asset_id}")
     for scene in project.scenes:
         if scene.sfx_asset_id == sfx_asset_id:
             scene.sfx_asset_id = None
+    project.timeline.sfx = [c for c in project.timeline.sfx if c.asset_id != sfx_asset_id]
     (store.project_dir(project.project_id) / asset.path).unlink(missing_ok=True)
     project.assets.pop(sfx_asset_id, None)
     _invalidate_from(project, "timeline")
@@ -287,6 +305,83 @@ def set_scene_transition(
     scene.transition = transition
     _invalidate_from(project, "timeline")
     store.save(project, message=f"{project.project_id}: {scene_id} 转场 {transition}")
+    return project
+
+
+def add_user_audio(
+    store: ProjectStore, project: Project, scene_id: str, path: Path,
+) -> Project:
+    """场景自带音频上传（M10）：拷贝到 assets/user_audio/<scene_id>.<ext>，
+    注册 audio 资产（id = user_audio_<scene_id>）并绑定到场景。
+
+    创作者自己的录音替代该场景 TTS 配音，经 transcribe 节点本地转写为字幕；
+    同名场景重新上传 = 覆盖（音频哈希变化 → 转写缓存自动失效）。
+    失效 transcribe（含）起 —— gen_assets 不动（TTS 素材留着无害，时间线优先
+    用自带音频）。
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f"音频文件不存在: {path}")
+    if path.suffix.lower() not in (".mp3", ".wav", ".m4a"):
+        raise ValueError(f"自带音频只支持 mp3/wav/m4a: {path.suffix}")
+    scene = _get_scene(project, scene_id)
+    dest = store.project_dir(project.project_id) / USER_AUDIO_DIR / f"{scene_id}{path.suffix.lower()}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(path, dest)
+    audio_id = f"user_audio_{scene_id}"
+    project.assets[audio_id] = Asset(
+        type="audio",
+        path=str(dest.relative_to(store.project_dir(project.project_id))).replace("\\", "/"),
+        cost=0.0,
+        status="done",
+    )
+    scene.user_audio_asset_id = audio_id
+    _invalidate_from(project, "transcribe")
+    store.save(project, message=f"{project.project_id}: {scene_id} 自带音频上传")
+    return project
+
+
+def remove_user_audio(store: ProjectStore, project: Project, scene_id: str) -> Project:
+    """移除场景自带音频（M10）：解绑 + 删资产/文件/转写缓存，回到 TTS 配音。
+
+    先清 timeline 里引用该资产的旧 clip（时间线已组装时防悬空引用 —— 下次 load
+    的引用校验会炸）；失效 gen_assets（含）起 —— 该场景 TTS 配音与字幕要重建
+    （gen_assets 重建字幕时会丢弃已解绑场景的 whisper 字幕）。
+    """
+    scene = _get_scene(project, scene_id)
+    audio_id = scene.user_audio_asset_id
+    if audio_id is None:
+        raise ValueError(f"scene {scene_id} 没有自带音频")
+    project.timeline.voiceover = [
+        c for c in project.timeline.voiceover if c.asset_id != audio_id
+    ]
+    asset = project.assets.pop(audio_id, None)
+    scene.user_audio_asset_id = None
+    if asset:
+        (store.project_dir(project.project_id) / asset.path).unlink(missing_ok=True)
+    assets_dir = store.project_dir(project.project_id) / "assets"
+    (assets_dir / f"whisper_{scene_id}.json").unlink(missing_ok=True)   # 转写缓存一并清理
+    _invalidate_from(project, "gen_assets")
+    store.save(project, message=f"{project.project_id}: {scene_id} 移除自带音频")
+    return project
+
+
+def set_whisper_config(
+    store: ProjectStore, project: Project, model: str, language: str,
+) -> Project:
+    """转写模型/语言配置（M10）：模型尺寸（tiny~large-v3）+ 语言（"" = 自动检测）。
+
+    配置变了转写缓存自动失效（sidecar 三键校验之一）；transcribe 起重跑。
+    """
+    if model not in WHISPER_MODELS:
+        raise ValueError(f"非法 whisper 模型: {model}（可选 {list(WHISPER_MODELS)}）")
+    project.config.whisper_model = model
+    project.config.whisper_language = (language or "").strip()
+    _invalidate_from(project, "transcribe")
+    store.save(
+        project,
+        message=f"{project.project_id}: whisper 配置 {model}/{'自动' if not language else language}",
+    )
     return project
 
 

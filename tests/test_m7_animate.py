@@ -172,8 +172,8 @@ def _write_raw_json(store: ProjectStore, pid: str, data: dict) -> None:
 
 
 def test_load_shim_inserts_animate_node(store) -> None:
-    """0.2 旧项目：pipeline 只有 5 键 → 加载后补 animate（pending）并按序重建。"""
-    old_nodes = [n for n in PIPELINE_NODES if n != "animate"]
+    """0.2 旧项目：pipeline 只有 5 键 → 加载后补 animate/transcribe（pending）并按序重建。"""
+    old_nodes = [n for n in PIPELINE_NODES if n not in ("animate", "transcribe")]
     _write_raw_json(store, "legacy", {
         "project_id": "legacy",
         "schema_version": "0.2",
@@ -184,17 +184,18 @@ def test_load_shim_inserts_animate_node(store) -> None:
     project = store.load("legacy")
     assert list(project.pipeline) == list(PIPELINE_NODES)
     assert project.pipeline["animate"] == "pending"
+    assert project.pipeline["transcribe"] == "pending"   # M10 新节点补键
     for n in old_nodes:
         assert project.pipeline[n] == "done"     # 旧状态保留，断点续跑语义不破坏
-    assert project.schema_version == "0.5"       # M9：内存升版到 0.5
+    assert project.schema_version == "0.6"       # M10：内存升版到 0.6
 
 
 def test_load_keeps_030_project_untouched(store) -> None:
     project = Project(project_id="p3", scenes=[_scene("none")])
     store.create(project)
-    loaded = store.load("p3")                    # 0.3 项目：pipeline 键不动，版本升 0.5
+    loaded = store.load("p3")                    # 0.3 项目：pipeline 键不动，版本升 0.6
     assert list(loaded.pipeline) == list(PIPELINE_NODES)
-    assert loaded.schema_version == "0.5"
+    assert loaded.schema_version == "0.6"
 
 
 # ---------------------------------------------------------------- timeline 尾拍

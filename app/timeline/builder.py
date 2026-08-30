@@ -20,6 +20,10 @@
 - M8 BGM 卡点：config.beat_sync 且 assets/bgm.mp3 存在时，场景切换点（≥第 2 场景）
   向前 snap 到最近节拍（≤ SNAP_MAX_MS，只前移不后移 —— 配音不重叠），切点停顿处
   只有 BGM；节拍解码失败降级跳过（BGM 属装饰，不阻塞主线）；
+- M10 自带音频：scene.user_audio_asset_id 存在时该场景配音用创作者录音（时长 =
+  实际音频，mutagen 读），替代 TTS vo_<scene_id>；转写缓存 sidecar
+  （whisper_<scene_id>.json，音频哈希/模型/语言三键）必须有效 —— 缺失 = 未转写
+  或音频已更换，FatalError 提示先跑 avpo transcribe（字幕与录音不匹配宁可停下）；
 - scene.start_ms 记录全局起点 —— 字幕仍保持场景内相对时间戳（M1 产物），导出时按
   scene.start_ms 平移（app/export/jianying.py），单一真相源不破坏幂等；
 - voiceover 顶层字段填汇总：status=done，duration_ms = 整片时长（配音 + 首尾帧
@@ -31,8 +35,9 @@
 
 from pathlib import Path
 
-from mutagen.mp3 import MP3
+from mutagen import File as MutagenFile
 
+from app.audio import whisper
 from app.audio.beats import detect_beats
 from app.core.schema import AudioClip, Project, Scene, VideoClip
 from app.core.state import FatalError
@@ -40,6 +45,8 @@ from app.core.state import FatalError
 # M8 项目素材约定：BGM 与音效目录（edits/export 同源引用，改这里三处生效）
 BGM_FILENAME = "bgm.mp3"
 SFX_DIR = "assets/sfx"
+# M10 用户自带音频目录（edits 写入 / timeline+transcribe 读取，同源引用）
+USER_AUDIO_DIR = "assets/user_audio"
 SNAP_MAX_MS = 400           # 卡点对齐：切点向前 snap 的最大提前量（切点停顿 ≤ 0.4s）
 TRANSITION_DEFAULT = "flash_white"   # M9 止损转场：auto 的默认转场（无结束帧的切点闪白覆盖）
 
@@ -63,7 +70,9 @@ def build_timeline(project: Project, project_root: Path) -> None:
     beats = _load_beats(project, project_root)
 
     for i, scene in enumerate(project.scenes):
-        vo_id = f"vo_{scene.scene_id}"
+        # M10 自带音频：配音用创作者录音（时长 = 实际音频）；转写缓存必须有效
+        # （音频哈希/模型/语言三键）—— 否则字幕与录音不匹配，宁可停下提示转写
+        vo_id = scene.user_audio_asset_id or f"vo_{scene.scene_id}"
         img_id = scene.image_asset_id
         if img_id is None:
             raise FatalError(
@@ -81,6 +90,17 @@ def build_timeline(project: Project, project_root: Path) -> None:
         if not vo_path.is_file():
             raise FatalError(f"配音文件缺失: {vo_path}", hint="先跑 avpo gen-assets 重新生成")
 
+        if scene.user_audio_asset_id:
+            if whisper.load_whisper_cache(
+                project_root / "assets", scene.scene_id,
+                whisper.audio_sha256(vo_path),
+                project.config.whisper_model, project.config.whisper_language,
+            ) is None:
+                raise FatalError(
+                    f"scene {scene.scene_id} 自带音频尚未转写（或音频/配置已更换）",
+                    hint="先跑 avpo transcribe",
+                )
+
         img_asset = project.assets.get(img_id)
         if img_asset is None:
             raise FatalError(
@@ -95,7 +115,7 @@ def build_timeline(project: Project, project_root: Path) -> None:
         if duration_ms <= 0:
             raise FatalError(
                 f"配音时长异常: {vo_path} = {duration_ms}ms",
-                hint="先跑 avpo gen-assets 重新生成配音",
+                hint="重新上传音频" if scene.user_audio_asset_id else "先跑 avpo gen-assets 重新生成配音",
             )
 
         # M8 卡点：切点向前 snap 到最近节拍（首场景从 0 起不动；只前移不后移）
@@ -213,5 +233,11 @@ def _resolve_transition(scene: Scene, has_next: bool) -> str:
 
 
 def _audio_duration_ms(path: Path) -> int:
-    """mutagen 读 mp3 实际时长（秒 → 毫秒，四舍五入）。"""
-    return round(MP3(path).info.length * 1000)
+    """mutagen 读音频实际时长（秒 → 毫秒，四舍五入）；mp3/wav/m4a 均可（M10 起）。
+
+    不可解析抛 FatalError（配音与自带音频同路径 —— 组装失败带修复提示）。
+    """
+    audio = MutagenFile(path)
+    if audio is None or audio.info is None:
+        raise FatalError(f"音频无法解析: {path}", hint="更换有效音频文件（mp3/wav/m4a）")
+    return round(audio.info.length * 1000)

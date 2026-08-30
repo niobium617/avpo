@@ -190,6 +190,32 @@ M7 的静态尾拍硬切（设计过的剪辑）。
 - **旧项目兼容**：0.1~0.4 数据加载即内存升版 0.5（新字段全部默认值），文件不迁移；
   旧项目跑 timeline 即获得止损默认，可逐镜关掉。
 
+## 本地字幕（M10）
+
+创作者自己的声音优先：分镜页给任一场景上传自己的录音（mp3/wav/m4a），该场景的
+TTS 配音被替代，本地 Whisper 转写录音为字幕 —— 0 API 成本、纯本地推理。
+
+- **上传即绑定**：分镜页每场景「上传自带音频」（`Scene.user_audio_asset_id`），
+  文件入 `assets/user_audio/`；失效 transcribe（含）起，gen_assets 不动（TTS 素材
+  留着无害，时间线优先用录音）。移除音频回到 TTS 配音，失效 gen_assets 起
+  （配音与文案字幕重建）。
+- **transcribe 节点**：`avpo transcribe` / 工作台流水线页按钮 / 一键全链路第 4 步
+  （direct → confirm → gen_assets → **transcribe** → animate → timeline → export）。
+  逐场景本地转写（faster-whisper，CTranslate2 CPU int8），模型懒加载单例进程内共享；
+  sidecar 缓存 `assets/whisper_<scene>.json`（音频 sha256 + 模型 + 语言三键校验），
+  命中 0 次推理 —— 断点续跑语义与 TTS 缓存一致；未检出语音 = 失败（不静默产出空字幕）。
+- **模型与语言**：`ProjectConfig.whisper_model`（tiny/base/small/medium/large-v3，
+  默认 small）+ `whisper_language`（默认 zh，留空 = 自动检测），策划页即时改配置
+  （transcribe 起重跑）；模型首次使用联网下载，缓存于 `<数据目录>/whisper_models`
+  （`AVPO_WHISPER_CACHE` 可改位置；国内网络可设 `HF_ENDPOINT=https://hf-mirror.com`）。
+- **时间线**：自带音频场景的配音 clip = 录音（时长 = 实际音频，mutagen 读）；转写
+  缓存必须有效（音频/模型/语言三键）—— 未转写或音频已更换时组装 FatalError 提示
+  先跑 transcribe（字幕与录音不匹配宁可停下）。
+- **导出**：录音走既有配音轨（300ms 淡入淡出一致）；whisper 字幕段走既有字幕通道
+  （场景内相对时间戳 + 导出按 scene.start_ms 平移，样式同风格模板）。
+- **旧项目兼容**：0.1~0.5 数据加载即内存升版 0.6（新字段全部默认值 + pipeline 补
+  transcribe 键），文件不迁移；旧项目行为不变（无自带音频场景节点空转）。
+
 ## 成本
 
 - 记账：每次 API 调用成功即写 cost 到场景/资产（LLM 分镜成本均摊到场景，生图记
@@ -214,9 +240,9 @@ M7 的静态尾拍硬切（设计过的剪辑）。
 | 页面 | 功能 |
 |---|---|
 | 项目管理 | 项目卡片列表（进度/成本）+ 新建项目（标题/风格模板/渠道/音色） |
-| 策划 | Brief 创作简报 + 参考图组（角度/角色标签、渠道能力提示）+ BGM 上传/卡点开关/节拍预览 + 音效库 |
-| 分镜确认 | 创作者枢纽：文案/景别/规划时长/音效描述与切点音效绑定、增删排序、每镜 AI 重写、候选画廊（选中/重 roll/精修/结束帧）、确认 |
-| 流水线 | 6 节点状态徽章 + 单节点运行 + 「自动模式（高级）」一键全链路 + 错误记录 + 草稿 zip 下载 |
+| 策划 | Brief 创作简报 + 参考图组（角度/角色标签、渠道能力提示）+ BGM 上传/卡点开关/节拍预览 + 音效库 + Whisper 模型/语言配置 |
+| 分镜确认 | 创作者枢纽：文案/景别/规划时长/音效描述与切点音效绑定、自带音频上传/移除/转写字幕预览、增删排序、每镜 AI 重写、候选画廊（选中/重 roll/精修/结束帧）、确认 |
+| 流水线 | 7 节点状态徽章 + 单节点运行（含 transcribe）+ 「自动模式（高级）」一键全链路 + 错误记录 + 草稿 zip 下载 |
 | 成本面板 | 总成本/预算 metric + 按场景/资产明细 + 超预算告警 |
 
 M5 后台任务模型：
@@ -259,8 +285,11 @@ M6 编辑语义（`app/core/edits.py`）：策划保存/分镜修改/候选改�
 │ vision/    生图（多渠道）+ prompt_hash   │
 │ core/motion.py  运镜解析唯一入口（M7）   │
 │ audio/     BGM 节拍检测（M8，卡点对齐） │
+│            + 本地转写（M10，faster-     │
+│            whisper + sidecar 缓存）      │
 │ timeline/  全局时间轴（mutagen 实长 +    │
-│            首尾帧尾拍 + sfx/卡点）       │
+│            首尾帧尾拍 + sfx/卡点 +       │
+│            用户自带音频）                │
 │ export/    剪映草稿（pyJianYingDraft +   │
 │            关键帧运镜 + sfx/BGM 轨）     │
 │ core/      cost 账本 / errors 分类 /     │
@@ -280,8 +309,8 @@ AVPO/
 │   ├── director/     # AI 导演助手：文案 → 分镜（LLM 强制 JSON + 逐字校验）
 │   ├── tts/          # edge-tts 配音 + word 时间戳 + sidecar 缓存 → 字幕
 │   ├── vision/       # 生图（dashscope 千问 / siliconflow FLUX）+ seed 级缓存 + 参考图注入
-│   ├── audio/        # M8：BGM 节拍检测（miniaudio 解码 + 能量包络峰值）
-│   ├── timeline/     # 时间线组装（场景时长 = 配音实际时长 + 首尾帧尾拍 + 音效轨 + BGM 卡点）
+│   ├── audio/        # M8：BGM 节拍检测（miniaudio 解码 + 能量包络峰值）；M10：本地语音转写（faster-whisper + sidecar 缓存）
+│   ├── timeline/     # 时间线组装（场景时长 = 配音实际时长 + 首尾帧尾拍 + 音效轨 + BGM 卡点 + 自带音频）
 │   ├── export/       # 剪映草稿生成（pyJianYingDraft 封装，关键帧运镜 + 模板字幕样式 + BGM/sfx 轨）
 │   ├── web/          # Streamlit 工作台（M4：四功能区；M5：后台线程 + 真进度条）
 │   └── cli.py        # avpo 命令入口
@@ -304,6 +333,7 @@ AVPO/
 | M7 | 动态化（运镜关键帧 + 首尾帧）| animate 节点（六节点流水线）+ 四种运镜全关键帧化（pan 降级解除）+ 候选图选结束帧 → 0.4s 静态尾拍 + 旧项目兼容 shim，276 测试全绿 | ✅ |
 | M8 | 音频（sfx 素材引用 + BGM 卡点对齐）| 音效库上传 + 切点绑定 + sfx 独立轨导出 + miniaudio 节拍检测向前 snap 卡点 + BGM 来源解耦（上传优先/模板兜底），303 测试全绿 | ✅ |
 | M9 | 止损转场（0.3s 闪白/震动覆盖不可修帧）| Scene.transition auto 止损（无结束帧的切点自动闪白，创作者逐镜覆盖）+ VideoClip.transition 组装解析 + 剪映 TransitionType 导出（300ms）+ 分镜页转场 selectbox + shim 0.5，317 测试全绿 | ✅ |
+| M10 | 本地字幕（用户自带音频 → Whisper 转写）| 场景自带音频上传/移除（替代 TTS 配音）+ transcribe 节点（faster-whisper 本地推理 + 三键 sidecar 缓存）+ 时间线录音时长/转写守卫 + 导出走既有配音/字幕通道 + 策划页模型配置 + shim 0.6，351 测试全绿 + 真实模型端到端转写验证 | ✅ |
 
 完整方案见 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)、[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[SUMMARY.md](SUMMARY.md)、[docs/PROGRESS.md](docs/PROGRESS.md)。
 
@@ -325,6 +355,10 @@ pytest -m live                    # 真实链路（调用外部 API，按 .env �
   开关开启后建议试听核对（切点可回剪映手动微调）；BGM 素材自备，AVPO 不提供；
 - 音效：素材自备（`assets/sfx/` 本地入库，0 API 成本）；音效放在场景切点，
   不提供多时间点/音量包络微调（可在剪映内调）；
+- 本地字幕：首次转写需联网下载 whisper 模型（small ≈ 460MB，缓存于数据目录
+  `whisper_models/`，国内网络可设 `HF_ENDPOINT=https://hf-mirror.com`）；字幕按
+  whisper 识别段一行展示（不做词级切分），识别错误需人工核对（创作者在环）；
+  模型越大越准越慢（tiny~large-v3 可换）；
 - 渠道 key 只放 `.env`，不入库（公开仓库规范）；
 - 工作台单会话单任务（运行中不能开第二个任务/多项目并行）；`ProjectStore.save` 锁为进程内
   锁，CLI 与 Web 同时跑同一数据目录时 git 提交不互斥；运行中关浏览器任务继续跑完落盘，
