@@ -89,9 +89,10 @@
 - **模型下载**：Systran/faster-whisper-small（462MB）缓存于 `data/whisper_models`（git
   忽略）；hf-mirror 的 HEAD 元数据请求在本机代理下不稳定，curl 直传 + hub 缓存布局校验
   落盘，get_model 已加 `local_files_only` 兜底（缓存完整时离线可用）
-- **待办**：草稿 `exports/proj_m1demo_draft` 的剪映 9.7.1 打开验证（本机人工环节，M0 以来
-  既定流程：拷入剪映草稿目录后重启剪映打开）—— 本次无人值守，留待用户验收后补记
+- **待办**：草稿 `data/projects/proj_m10verify/exports/proj_m10verify_draft` 的剪映 9.7.1
+  打开验证（本机人工环节，M0 以来既定流程：拷入剪映草稿目录后重启剪映打开）——
+  本次无人值守，留待用户验收后补记
 
 | 日期 | 里程碑 | 草稿 | 剪映版本 | 结果 | 现象/备注 |
 |---|---|---|---|---|---|
-| 2026-08-30 | M10 | proj_m1demo_draft（M10 副本导出） | 待验收 | ⏳ | 端到端通过（转写/时间线/导出）；剪映打开待用户验收后补记 |
+| 2026-08-30 | M10 | proj_m10verify_draft（验收副本，s1 自带音频 + s2 TTS 对照） | 待验收 | ⏳ | 端到端通过（转写/时间线/导出）；剪映打开待用户验收后补记 |
