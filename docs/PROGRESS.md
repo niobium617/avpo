@@ -4,7 +4,7 @@
 
 ## 当前状态（2026-08-30）
 
-**M10 本地字幕 —— 10.1~10.10 全部完成**（351 测试全绿 + 2 live 跳过）
+**M10 本地字幕 —— 10.1~10.10 全部完成，正式关闭**（354 测试全绿 + 2 live 跳过；剪映 9.7.1 打开验证 ✅）
 
 | 任务 | 产出 | 状态 |
 |---|---|---|
@@ -17,7 +17,7 @@
 | 10.7 web | 策划页 Whisper 模型 selectbox + 语言输入即时落盘；分镜页每场景自带音频上传（mp3/wav/m4a）/移除按钮/转写字幕预览；流水线页「运行 transcribe」按钮（徽章 7 节点） | ✅ |
 | 10.8 CLI | status：config 行 whisper=model/lang + 场景行 audio=（自带音频 id 或 TTS）；`avpo transcribe` 命令 + run 链第 4 步 + 流水线描述更新 | ✅ |
 | 10.9 测试 | `tests/test_m10_whisper.py` 30 条（引擎哈希/缓存三键/env 覆盖/懒加载单例/错误分类；schema 引用校验；edits 六函数与失效语义；transcribe 节点跳过/落盘/缓存命中/空结果/下载失败/文件缺失 + gen_assets 跳过保留；timeline 录音替代/未转写守卫/缓存不符/幂等；导出录音轨与字幕）+ web 4 新（策划页模型/语言绑定 + 分镜页移除/上传器）+ 版本断言与节点序断言 6 处改写 0.6 + 全链路调用序断言含 transcribe | ✅ **351 全绿** |
-| 10.10 文档 + 真模验证 | README M10 章 + 工作台表/架构图/目录/里程碑表 + 已知限制（模型下载/段级字幕）；本文件 + 路线图；versions.md schema 0.6 + faster-whisper 1.2.1；**真模验证**：Systran/faster-whisper-small（462MB）下载到 data/whisper_models（git 忽略，get_model 加 local_files_only 离线兜底）→ 真实转写 proj_m1demo 录音文本与原文案逐字一致 → 端到端（老项目副本 shim 0.6 → 上传自带音频 → transcribe → timeline → export 草稿 JSON 校验）通过；剪映 9.7.1 打开验证留待用户（opened_log ⏳） | ✅ |
+| 10.10 文档 + 真模验证 | README M10 章 + 工作台表/架构图/目录/里程碑表 + 已知限制（模型下载/段级字幕）；本文件 + 路线图；versions.md schema 0.6 + faster-whisper 1.2.1；**真模验证**：Systran/faster-whisper-small（462MB）下载到 data/whisper_models（git 忽略，get_model 加 local_files_only 离线兜底）→ 真实转写 proj_m1demo 录音文本与原文案逐字一致 → 端到端（老项目副本 shim 0.6 → 上传自带音频 → transcribe → timeline → export 草稿 JSON 校验）通过；**剪映 9.7.1 打开验证 ✅（用户验收）**——字幕 t2s 全简体、自带音频轨正常、可编辑保存，**M10 正式关闭** | ✅ |
 
 要点（M10）：
 - **创作者自己的声音优先**：分镜页上传录音即替代该场景 TTS 配音，本地 Whisper
