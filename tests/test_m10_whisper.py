@@ -143,6 +143,31 @@ def test_transcribe_audio_returns_ms_segments(tmp_path: Path, monkeypatch) -> No
     assert segs == [WhisperSegment(start_ms=0, end_ms=900, text="第一句。")]
 
 
+def test_transcribe_simplifies_traditional_chinese(tmp_path: Path, monkeypatch) -> None:
+    """简繁归一（M10 修补）：whisper 小模型输出简繁混杂 → OpenCC t2s 统一简体。"""
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"mp3")
+    seg = type("S", (), {"start": 0.0, "end": 2.5, "text": "AI 正在改變內容創作的方式"})
+    monkeypatch.setattr(whisper, "get_model", lambda m, root: _FakeModel(segments=[seg]))
+
+    segs = whisper.transcribe_audio(audio, "small", "zh", tmp_path / "models")
+
+    assert segs[0].text == "AI 正在改变内容创作的方式"
+
+
+def test_transcribe_keeps_traditional_when_disabled(tmp_path: Path, monkeypatch) -> None:
+    """SIMPLIFY_CHINESE=False（繁体项目）：原样保留（单点可调开关）。"""
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"mp3")
+    seg = type("S", (), {"start": 0.0, "end": 1.0, "text": "改變內容"})
+    monkeypatch.setattr(whisper, "get_model", lambda m, root: _FakeModel(segments=[seg]))
+    monkeypatch.setattr(whisper, "SIMPLIFY_CHINESE", False)
+
+    segs = whisper.transcribe_audio(audio, "small", "zh", tmp_path / "models")
+
+    assert segs[0].text == "改變內容"
+
+
 def test_transcribe_audio_missing_file(tmp_path: Path) -> None:
     with pytest.raises(WhisperDecodeError, match="缺失"):
         whisper.transcribe_audio(tmp_path / "nope.mp3", "small", "zh", tmp_path)

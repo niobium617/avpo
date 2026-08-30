@@ -23,6 +23,9 @@
 - **创作者自己的声音优先**：分镜页上传录音即替代该场景 TTS 配音，本地 Whisper
   转写为字幕 —— 0 API 成本、纯本地推理；字幕是「实际说出的词」（whisper 识别），
   不是文案脚本 —— 文案与字幕可能不同，这是特性不是 bug（人在环上核对）。
+- **简繁归一（验收后修补）**：small 模型中文输出简繁混用（实测「变/内/创」→
+  「變/內/創」），转写后 OpenCC t2s 统一简体（`SIMPLIFY_CHINESE` 单点可调，
+  繁体项目置 False；t2s 对非中文文本空操作）。验收副本已重转重导出。
 - **节点位置 = 失效语义**：transcribe 夹在 gen_assets 与 animate 之间 —— 上传/换配置
   失效 `transcribe` 起（gen_assets/生图不动）；移除失效 `gen_assets` 起（TTS 配音与
   文案字幕重建，gen_assets 重建时丢弃已解绑场景的 whisper 字幕、保留现绑场景的）。

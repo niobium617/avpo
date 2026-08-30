@@ -208,6 +208,8 @@ TTS 配音被替代，本地 Whisper 转写录音为字幕 —— 0 API 成本�
   默认 small）+ `whisper_language`（默认 zh，留空 = 自动检测），策划页即时改配置
   （transcribe 起重跑）；模型首次使用联网下载，缓存于 `<数据目录>/whisper_models`
   （`AVPO_WHISPER_CACHE` 可改位置；国内网络可设 `HF_ENDPOINT=https://hf-mirror.com`）。
+  转写文本经 OpenCC t2s 简繁归一（whisper 训练语料简繁混杂，小模型输出会简繁混用；
+  繁体项目可关 `SIMPLIFY_CHINESE`）。
 - **时间线**：自带音频场景的配音 clip = 录音（时长 = 实际音频，mutagen 读）；转写
   缓存必须有效（音频/模型/语言三键）—— 未转写或音频已更换时组装 FatalError 提示
   先跑 transcribe（字幕与录音不匹配宁可停下）。
@@ -358,7 +360,8 @@ pytest -m live                    # 真实链路（调用外部 API，按 .env �
 - 本地字幕：首次转写需联网下载 whisper 模型（small ≈ 460MB，缓存于数据目录
   `whisper_models/`，国内网络可设 `HF_ENDPOINT=https://hf-mirror.com`）；字幕按
   whisper 识别段一行展示（不做词级切分），识别错误需人工核对（创作者在环）；
-  模型越大越准越慢（tiny~large-v3 可换）；
+  模型越大越准越慢（tiny~large-v3 可换）；转写文本已做 OpenCC 简繁归一
+  （t2s，繁体项目可关 `SIMPLIFY_CHINESE`）；
 - 渠道 key 只放 `.env`，不入库（公开仓库规范）；
 - 工作台单会话单任务（运行中不能开第二个任务/多项目并行）；`ProjectStore.save` 锁为进程内
   锁，CLI 与 Web 同时跑同一数据目录时 git 提交不互斥；运行中关浏览器任务继续跑完落盘，

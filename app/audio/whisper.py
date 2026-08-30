@@ -23,9 +23,27 @@ from app.core.schema import WhisperModelKind
 WHISPER_MODELS = tuple(WhisperModelKind.__args__)   # tiny/base/small/medium/large-v3
 DEFAULT_MODEL = "small"      # 中文口播精度/速度平衡点（base 更快、medium 更准，均可换）
 DEFAULT_LANGUAGE = "zh"      # 中文项目默认；"" = whisper 自动检测
+# 简繁归一（OpenCC t2s）：whisper 训练语料简繁混杂，小模型输出会简繁混用
+# （实测 small 把「变/内/创」识别成「變/內/創」）—— 转写后统一转简体；
+# t2s 对非中文文本是空操作。台/港繁体项目可改为 False（单点可调）。
+SIMPLIFY_CHINESE = True
 
 # (model, download_root) → WhisperModel 懒加载单例（进程内共享）
 _MODELS: dict[tuple[str, str], object] = {}
+
+# OpenCC 惰性加载（首次转写才初始化，CLI 冷启动不背字典文件）
+_t2s = None
+
+
+def _to_simplified(text: str) -> str:
+    """繁体 → 简体（OpenCC t2s）；开关关闭时原样返回。"""
+    global _t2s
+    if not SIMPLIFY_CHINESE:
+        return text
+    if _t2s is None:
+        from opencc import OpenCC
+        _t2s = OpenCC("t2s")
+    return _t2s.convert(text)
 
 
 class WhisperModelError(ValueError):
@@ -109,7 +127,11 @@ def transcribe_audio(
         m = get_model(model, download_root)
         segments, _info = m.transcribe(str(path), language=language or None)
         return [
-            WhisperSegment(start_ms=round(seg.start * 1000), end_ms=round(seg.end * 1000), text=seg.text.strip())
+            WhisperSegment(
+                start_ms=round(seg.start * 1000),
+                end_ms=round(seg.end * 1000),
+                text=_to_simplified(seg.text.strip()),
+            )
             for seg in segments
             if seg.text.strip()
         ]
