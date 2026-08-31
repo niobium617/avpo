@@ -6,7 +6,9 @@
 - widget 改动后必须显式 at.run()（AppTest 不自动重跑）；
 - 全链路节点全 mock，无真实 API 等待；
 - M5 后台任务：点击按钮后 worker 线程异步执行，测试用 _wait_task 等容器 done Event，
-  再 at.run() 让进度 fragment 消费任务（st.rerun 链在同一 run 内处理）。
+  再 at.run() 让进度 fragment 消费任务（st.rerun 链在同一 run 内处理）；
+- M11 多任务：任务槽 session_state["tasks"] 按项目（dict[pid]），_wait_task/_no_task
+  带 pid 参数（默认 proj_ui），跨项目并行用双慢 mock + Event 同步断言。
 """
 
 import os
@@ -91,15 +93,20 @@ def _ss(at: AppTest, key: str):
     return at.session_state[key] if key in at.session_state else None
 
 
-def _wait_task(at: AppTest, timeout: float = 10.0) -> None:
-    """等待后台任务完成。worker 线程独立于脚本线程：直接等容器的 done Event。
+def _no_task(at: AppTest, pid: str = "proj_ui") -> bool:
+    """该项目无运行中任务（M11：任务槽按项目，tasks dict 无该 pid 键）。"""
+    return (_ss(at, "tasks") or {}).get(pid) is None
 
-    mock 秒回时任务可能已被同一次 at.run() 里的 fragment 消费（task 为 None）——
+
+def _wait_task(at: AppTest, timeout: float = 10.0, pid: str = "proj_ui") -> None:
+    """等待该项目后台任务完成。worker 线程独立于脚本线程：直接等容器的 done Event。
+
+    mock 秒回时任务可能已被同一次 at.run() 里的 fragment 消费（tasks 无 pid 槽）——
     此时断言结果区已生成即视为任务跑完。
     """
-    task = _ss(at, "task")
+    task = (_ss(at, "tasks") or {}).get(pid)
     if task is None:
-        assert _ss(at, "task_result") is not None, "未启动后台任务也无结果"
+        assert (_ss(at, "task_results") or {}).get(pid) is not None, "未启动后台任务也无结果"
         return
     assert task.done.wait(timeout), f"后台任务 {task.node} 超时（state={task.state}）"
 
@@ -173,7 +180,7 @@ def test_run_all_calls_nodes_in_order(at: AppTest, monkeypatch) -> None:
     # 全链路后 pipeline 全 done（节点 mock 落盘 + rerun 后徽章状态）
     loaded = _store().load("proj_ui")
     assert all(v == "done" for v in loaded.pipeline.values())
-    assert _ss(at, "task") is None                 # 任务已消费
+    assert _no_task(at)                 # 任务已消费
     assert any("chain 完成" in s.value for s in at.success)
 
 
@@ -189,7 +196,7 @@ def test_run_all_stops_at_unconfirmed(at: AppTest, monkeypatch) -> None:
     assert not at.exception
     assert calls == []                                          # 未确认 → 中断，不跑任何节点
     assert any("分镜待确认" in w.value for w in at.warning)
-    assert _ss(at, "task") is None                 # 未启动任务
+    assert _no_task(at)                 # 未启动任务
 
 
 def test_single_node_buttons(at: AppTest, monkeypatch) -> None:
@@ -236,14 +243,14 @@ def test_node_run_is_non_blocking_with_live_progress(at: AppTest, monkeypatch) -
     at.run()                                    # busy 在 run 顶部计算：再跑一次才渲染禁用态
 
     assert not at.exception
-    assert at.session_state["task"].state == "running"
+    assert at.session_state["tasks"]["proj_ui"].state == "running"
     assert at.button(key="run_tl_proj_ui").disabled is True     # 运行中禁用
     assert at.button(key="run_all_proj_ui").disabled is True
     assert started.wait(1.0)                    # worker 真在跑（2s 慢 mock 未完成）
     _wait_task(at)
     at.run()                                    # fragment 消费 + 刷新
 
-    assert _ss(at, "task") is None
+    assert _no_task(at)
     assert any("timeline 完成" in s.value for s in at.success)
     assert at.button(key="run_tl_proj_ui").disabled is False    # 完成恢复
     assert _store().load("proj_ui").pipeline["timeline"] == "done"
@@ -301,7 +308,7 @@ def test_node_failure_path(at: AppTest, monkeypatch) -> None:
 
     assert not at.exception
     assert any("测试失败" in e.value for e in at.error)
-    assert _ss(at, "task") is None
+    assert _no_task(at)
     assert _store().load("proj_ui").pipeline["gen_assets"] == "failed"
     assert at.button(key="run_gen_proj_ui").disabled is False
 
@@ -321,7 +328,7 @@ def test_chain_aborted_missing_text(at: AppTest, monkeypatch) -> None:
     assert not at.exception
     assert calls == []
     assert any("direct 未完成" in w.value for w in at.warning)
-    assert _ss(at, "task") is None
+    assert _no_task(at)
 
 
 def test_progress_events_recorded(at: AppTest, monkeypatch) -> None:
@@ -345,17 +352,17 @@ def test_progress_events_recorded(at: AppTest, monkeypatch) -> None:
     at.run()
     _wait_task(at)
 
-    task = at.session_state["task"]
+    task = at.session_state["tasks"]["proj_ui"]
     assert task is not None                    # 尚未被消费（sleep 保证 running 窗口）
     assert [(e.message, e.percent) for e in task.events] == [
         ("配音 1/2", 0.25), ("配音 2/2", 0.5), ("生图完成", 1.0),
     ]
     at.run()                                    # 消费
-    assert _ss(at, "task") is None
+    assert _no_task(at)
 
 
 def test_task_container_cleaned_between_tasks(at: AppTest, monkeypatch) -> None:
-    """前一任务消费后能立刻开下一任务：task_result 清空、新容器正常。"""
+    """前一任务消费后能立刻开下一任务：task_results 清空、新容器正常。"""
     _mock_pipeline(monkeypatch)
     _mk_project(pipeline={"direct": "done", "confirm": "done"})
 
@@ -370,14 +377,136 @@ def test_task_container_cleaned_between_tasks(at: AppTest, monkeypatch) -> None:
     at.run()                                    # 启动 export：清 task_result、新容器
 
     assert not at.exception
-    assert _ss(at, "task_result") is None
-    assert _ss(at, "task") is not None
+    assert (_ss(at, "task_results") or {}).get("proj_ui") is None
+    assert not _no_task(at)
     _wait_task(at)
     at.run()
 
-    assert _ss(at, "task") is None
+    assert _no_task(at)
     assert any("export 完成" in s.value for s in at.success)
     assert _store().load("proj_ui").pipeline["export"] == "done"
+
+
+# ---------------------------------------------------------------- M11 多任务并行
+
+def test_two_projects_parallel_tasks(at: AppTest, monkeypatch) -> None:
+    """M11 核心验收：项目 A 任务运行中，项目 B 照常启动任务 —— 两任务并行跑完。"""
+    calls: list[str] = []
+    started = {"proj_a": threading.Event(), "proj_b": threading.Event()}
+
+    def slow_timeline(store, p, progress=None):
+        calls.append(p.project_id)
+        started[p.project_id].set()
+        time.sleep(1.0)
+        p.pipeline["timeline"] = "done"
+        store.save(p, message="web 测试 timeline")
+        return True
+
+    monkeypatch.setattr("app.core.pipeline.run_timeline", slow_timeline)
+    for pid in ("proj_a", "proj_b"):
+        _mk_project(pid=pid, pipeline={"direct": "done", "confirm": "done", "gen_assets": "done"})
+
+    at.run()
+    _goto(at, "流水线", pid="proj_a")
+    at.button(key="run_tl_proj_a").click()
+    at.run()
+    assert started["proj_a"].wait(1.0)
+
+    _goto(at, "流水线", pid="proj_b")
+    assert at.button(key="run_tl_proj_b").disabled is False    # 不被项目 A 的任务锁
+    at.button(key="run_tl_proj_b").click()
+    at.run()
+
+    assert not at.exception
+    assert started["proj_b"].wait(1.0)
+    assert set(at.session_state["tasks"]) == {"proj_a", "proj_b"}   # 两任务并行在槽
+    caps = [c.value for c in at.caption]
+    assert any("后台任务[proj_a]" in c for c in caps)              # 进度区双条
+    assert any("后台任务[proj_b]" in c for c in caps)
+    _wait_task(at, pid="proj_a")
+    _wait_task(at, pid="proj_b")
+    at.run()
+
+    assert sorted(calls) == ["proj_a", "proj_b"]
+    for pid in ("proj_a", "proj_b"):
+        assert _store().load(pid).pipeline["timeline"] == "done"
+        assert _no_task(at, pid=pid)
+
+
+def test_busy_is_per_project_edits_not_locked(at: AppTest, monkeypatch) -> None:
+    """项目 A 运行中：A 的分镜编辑锁定（同项目互斥），B 的分镜编辑照常。"""
+    _mock_pipeline(monkeypatch)
+    started = threading.Event()
+
+    def slow_gen(store, p, tts, image, progress=None):
+        started.set()
+        time.sleep(1.0)
+        p.pipeline["gen_assets"] = "done"
+        store.save(p, message="web 测试 gen_assets")
+        return True
+
+    monkeypatch.setattr("app.core.pipeline.run_gen_assets", slow_gen)
+    for pid in ("proj_a", "proj_b"):
+        _mk_project(pid=pid, scenes=SCENES, pipeline={"direct": "done", "confirm": "done"})
+
+    at.run()
+    _goto(at, "流水线", pid="proj_a")
+    at.button(key="run_gen_proj_a").click()
+    at.run()
+    assert started.wait(1.0)
+
+    _goto(at, "分镜确认", pid="proj_a")
+    at.run()                                    # busy 在 run 顶部计算：再跑一次才渲染禁用态
+    assert at.button(key="addscene_proj_a").disabled is True   # 同项目：编辑锁定
+
+    _goto(at, "分镜确认", pid="proj_b")
+    assert at.button(key="addscene_proj_b").disabled is False  # 他项目：编辑照常
+
+    _wait_task(at, pid="proj_a")
+    at.run()
+    assert _no_task(at, pid="proj_a")
+    assert _store().load("proj_a").pipeline["gen_assets"] == "done"
+
+
+def test_result_isolated_per_project(at: AppTest, monkeypatch) -> None:
+    """结果区按项目隔离：项目 A 的完成信息不串到项目 B 页面，回 A 仍可见。"""
+    _mock_pipeline(monkeypatch)
+    for pid in ("proj_a", "proj_b"):
+        _mk_project(pid=pid, pipeline={"direct": "done", "confirm": "done"})
+
+    at.run()
+    _goto(at, "流水线", pid="proj_a")
+    at.button(key="run_tl_proj_a").click()
+    at.run()
+    _wait_task(at, pid="proj_a")
+    at.run()                                    # 消费 → proj_a 结果区渲染
+
+    assert any("timeline 完成" in s.value for s in at.success)
+
+    _goto(at, "流水线", pid="proj_b")
+    assert not any("timeline 完成" in s.value for s in at.success)   # 不串味
+
+    _goto(at, "流水线", pid="proj_a")
+    assert any("timeline 完成" in s.value for s in at.success)       # 回 A 仍可见
+
+
+def test_project_page_shows_all_results(at: AppTest, monkeypatch) -> None:
+    """项目管理页无当前项目概念：全部项目结果带 pid 标签汇总展示。"""
+    _mock_pipeline(monkeypatch)
+    _mk_project(pid="proj_a", pipeline={"direct": "done", "confirm": "done"})
+
+    at.run()
+    _goto(at, "流水线", pid="proj_a")
+    at.button(key="run_tl_proj_a").click()
+    at.run()
+    _wait_task(at, pid="proj_a")
+
+    _goto(at, "项目管理")                      # 任务已跑完：项目管理页也消费
+    at.run()
+
+    assert not at.exception
+    assert any("[proj_a] timeline 完成" in s.value for s in at.success)
+    assert _no_task(at, pid="proj_a")
 
 
 # ---------------------------------------------------------------- 页面 2：策划（M6-7.7）
@@ -705,7 +834,7 @@ def test_reroll_dispatches_to_worker(at: AppTest, monkeypatch) -> None:
 
     assert not at.exception
     assert calls == ["s1"]
-    assert _ss(at, "task") is None
+    assert _no_task(at)
     assert any("reroll_scene 完成" in s.value for s in at.success)
 
 
@@ -750,7 +879,7 @@ def test_rewrite_dispatches_instructions(at: AppTest, monkeypatch) -> None:
 
     assert not at.exception
     assert calls == [("s1", "夜晚")]
-    assert _ss(at, "task") is None
+    assert _no_task(at)
 
 
 # ---------------------------------------------------------------- 默认人审叙事（M6-7.9）
@@ -772,7 +901,7 @@ def test_run_all_moved_into_advanced_expander(at: AppTest, monkeypatch) -> None:
 
     assert not at.exception
     assert calls == ["gen_assets", "transcribe", "animate", "timeline", "export"]
-    assert _ss(at, "task") is None
+    assert _no_task(at)
 
 
 def test_storyboard_hub_hint_caption(at: AppTest) -> None:

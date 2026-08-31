@@ -218,6 +218,24 @@ TTS 配音被替代，本地 Whisper 转写录音为字幕 —— 0 API 成本�
 - **旧项目兼容**：0.1~0.5 数据加载即内存升版 0.6（新字段全部默认值 + pipeline 补
   transcribe 键），文件不迁移；旧项目行为不变（无自带音频场景节点空转）。
 
+## 工作台多任务并行（M11）
+
+项目 A 跑长任务（生图/转写）时，切到项目 B 照常策划、编辑、启动任务 ——
+任务槽按项目：**同项目互斥、跨项目并行**。
+
+- **每项目一个任务槽**：`session_state["tasks"] = {pid: TaskContainer}`。该项目
+  任务运行期间，它的运行按钮与分镜编辑/确认禁用（两个任务竞写同一 project.json
+  会互相覆盖，同项目仍互斥）；其他项目不受影响 —— busy 按项目计算
+  （`_project_busy`，启动守卫 + 按钮禁用双保险）。
+- **进度区多任务**：fragment 轮询全部运行中任务，一个项目一条进度条
+  （`后台任务[pid]：节点`）；终态任务一轮消费（结果写入 `task_results[pid]`）。
+- **结果按项目隔离**：项目页只展示当前项目的结果（不串味）；项目管理页无当前
+  项目概念，带 pid 标签汇总全部项目结果。
+- **并发安全**：不同项目目录天然隔离；`ProjectStore.save` 的进程内锁（M5）序列化
+  原子写与 git 提交，跨项目并行 save 安全。多浏览器会话对同一项目并发启动任务
+  不受本 UI 守卫保护（已知限制）。
+- 无 schema/依赖变更；CLI 不受影响（天然单任务）。
+
 ## 成本
 
 - 记账：每次 API 调用成功即写 cost 到场景/资产（LLM 分镜成本均摊到场景，生图记
@@ -251,8 +269,13 @@ M5 后台任务模型：
 - 节点在 worker 线程执行，页面立即返回不再冻结；进度经线程安全容器（`app/web/tasks.py`）
   传递，`st.fragment(run_every=1s)` 轮询渲染 st.progress（节点内百分比），完成自动刷新徽章；
   进度条与结果区跨页可见（重 roll/精修/AI 重写从分镜页发起，同页消费）；
-- 运行中所有运行按钮与分镜编辑/确认禁用（防双开与并发覆盖），失败/中止原因持久展示；
+- 运行中**该项目**的运行按钮与分镜编辑/确认禁用（防同项目双开与并发覆盖），
+  失败/中止原因持久展示；
 - `ProjectStore.save` 加线程锁串行化 git 提交（防多浏览器会话并发写坏 git 索引）。
+
+M11 多任务并行：任务槽按项目（`tasks` dict[pid]），同项目互斥、跨项目并行 ——
+项目 A 跑长任务时项目 B 的策划/分镜/流水线照常；进度区一个项目一条进度条；
+结果按项目隔离（项目页只显当前项目，项目管理页带 pid 标签汇总）。
 
 M6 编辑语义（`app/core/edits.py`）：策划保存/分镜修改/候选改选/参考图与 BGM 上传等
 人类触发的单次编辑全部「落盘 + 按需失效下游」，不走 run_task（无自动重试）——失败
@@ -269,9 +292,10 @@ M6 编辑语义（`app/core/edits.py`）：策划保存/分镜修改/候选改�
 ┌─────────────── app/cli.py ───────────────┐
 │ new / run / status / cost / web / 单节点 │
 └──────┬───────────────────────────────────┘
-       │        ┌── app/web/app.py（Streamlit 工作台 M4~M6）
+       │        ┌── app/web/app.py（Streamlit 工作台 M4~M11）
        │        │  项目管理 / 策划 / 分镜确认 / 流水线 / 成本面板
-       │        │  app/web/tasks.py（后台任务 worker + 进度容器 + ad-hoc 分发）
+       │        │  app/web/tasks.py（后台任务 worker + 进度容器 + ad-hoc 分发；
+       │        │                   M11 每项目任务槽）
        │        ▼
        │ app/core/pipeline.py（节点编排，下游失效自动重跑）
        │ app/core/edits.py（M6 人类单次编辑 API：落盘 + 按需失效下游）
@@ -314,7 +338,7 @@ AVPO/
 │   ├── audio/        # M8：BGM 节拍检测（miniaudio 解码 + 能量包络峰值）；M10：本地语音转写（faster-whisper + sidecar 缓存）
 │   ├── timeline/     # 时间线组装（场景时长 = 配音实际时长 + 首尾帧尾拍 + 音效轨 + BGM 卡点 + 自带音频）
 │   ├── export/       # 剪映草稿生成（pyJianYingDraft 封装，关键帧运镜 + 模板字幕样式 + BGM/sfx 轨）
-│   ├── web/          # Streamlit 工作台（M4：四功能区；M5：后台线程 + 真进度条）
+│   ├── web/          # Streamlit 工作台（M4：四功能区；M5：后台线程 + 真进度条；M11：多任务并行）
 │   └── cli.py        # avpo 命令入口
 ├── templates/        # 风格模板 JSON（fast_talk / emotional / explainer）
 ├── data/             # 项目数据（独立 git 仓库，每次保存自动提交 = 免费版本历史）
@@ -336,6 +360,7 @@ AVPO/
 | M8 | 音频（sfx 素材引用 + BGM 卡点对齐）| 音效库上传 + 切点绑定 + sfx 独立轨导出 + miniaudio 节拍检测向前 snap 卡点 + BGM 来源解耦（上传优先/模板兜底），303 测试全绿 | ✅ |
 | M9 | 止损转场（0.3s 闪白/震动覆盖不可修帧）| Scene.transition auto 止损（无结束帧的切点自动闪白，创作者逐镜覆盖）+ VideoClip.transition 组装解析 + 剪映 TransitionType 导出（300ms）+ 分镜页转场 selectbox + shim 0.5，317 测试全绿 | ✅ |
 | M10 | 本地字幕（用户自带音频 → Whisper 转写）| 场景自带音频上传/移除（替代 TTS 配音）+ transcribe 节点（faster-whisper 本地推理 + 三键 sidecar 缓存）+ 时间线录音时长/转写守卫 + 导出走既有配音/字幕通道 + 策划页模型配置 + shim 0.6，351 测试全绿 + 真实模型端到端转写验证 | ✅ |
+| M11 | 工作台多任务并行 | 任务槽按项目（同项目互斥/跨项目并行）+ busy 按项目 + 进度区多任务渲染 + 结果按项目隔离，357 测试全绿（web 45 条，新增 4 条 M11 用例） | ✅ |
 
 完整方案见 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)、[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[SUMMARY.md](SUMMARY.md)、[docs/PROGRESS.md](docs/PROGRESS.md)。
 
@@ -363,6 +388,7 @@ pytest -m live                    # 真实链路（调用外部 API，按 .env �
   模型越大越准越慢（tiny~large-v3 可换）；转写文本已做 OpenCC 简繁归一
   （t2s，繁体项目可关 `SIMPLIFY_CHINESE`）；
 - 渠道 key 只放 `.env`，不入库（公开仓库规范）；
-- 工作台单会话单任务（运行中不能开第二个任务/多项目并行）；`ProjectStore.save` 锁为进程内
-  锁，CLI 与 Web 同时跑同一数据目录时 git 提交不互斥；运行中关浏览器任务继续跑完落盘，
-  但进度条随会话丢失（重开看徽章终态）。
+- 工作台同项目单任务（M11：项目 A 任务运行中，A 的按钮/编辑禁用，B 照常并行）；
+  多浏览器会话对同一项目并发启动任务不受 UI 守卫保护（各任务互不知晓，后存者覆盖）；
+  `ProjectStore.save` 锁为进程内锁，CLI 与 Web 同时跑同一数据目录时 git 提交不互斥；
+  运行中关浏览器任务继续跑完落盘，但进度条随会话丢失（重开看徽章终态）。

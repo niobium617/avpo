@@ -4,7 +4,11 @@
 - worker 线程绝不调用任何 st.* API —— st.session_state 在无 ScriptRunContext 的
   线程里会落到全局 mock 单例（session_state_proxy.py:52-65），与本会话脱钩；
 - worker 只写 container（内部 Lock 保护），UI 轮询线程只读 snapshot()；
-- 单会话单任务：start_task 由 UI 在保证「无运行中任务」后调用（按钮禁用兜底）。
+- M11 每项目单任务：start_task 由 UI 在保证「该项目无运行中任务」后调用
+  （按钮按项目禁用兜底）；不同项目可并行 —— store.save 的 _SAVE_LOCK
+  （app/core/project.py）序列化原子写与 git 提交，跨项目并发安全。
+  同项目并发仍互斥（两任务竞写同一 project.json 会互相覆盖）；
+  多浏览器会话同项目并发不受此 UI 守卫保护，记为已知限制。
 """
 
 import threading
@@ -24,6 +28,7 @@ ADHOC_NODES = ("reroll_scene", "refine_scene", "rewrite_scene")
 class TaskContainer:
     """后台任务状态：worker 写、UI 读。state: running | done | failed | aborted。"""
     node: str                              # 节点名；"chain" = 一键全链路
+    pid: str = ""                          # M11：所属项目 id（UI 多任务槽 key 同源）
     events: list[ProgressEvent] = field(default_factory=list)
     state: str = "running"
     error: str = ""
@@ -51,7 +56,7 @@ def start_task(store: ProjectStore, project: Project, node: str,
 
     scene_id（M6-7.8）：ad-hoc 单场景操作（reroll/refine/rewrite）的目标场景。
     """
-    container = TaskContainer(node="chain" if chain else node)
+    container = TaskContainer(node="chain" if chain else node, pid=project.project_id)
     if chain:
         args = (store, project, text, container)
         target = _run_chain
@@ -61,7 +66,7 @@ def start_task(store: ProjectStore, project: Project, node: str,
     threading.Thread(
         target=target,
         args=args,
-        name=f"avpo-{container.node}", daemon=True,
+        name=f"avpo-{container.pid}-{container.node}", daemon=True,
     ).start()
     return container
 

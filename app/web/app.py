@@ -14,6 +14,9 @@
   app/web/tasks.py 的 TaskContainer（Lock 保护）传递；UI 用
   @st.fragment(run_every=1.0) 轮询渲染 st.progress，完成自动 st.rerun 刷新徽章；
   worker 线程绝不调 st.* / 绝不碰 st.session_state；
+- M11 多任务并行：session_state["tasks"] = {pid: TaskContainer}，每项目一个
+  任务槽 —— 同项目互斥（竞写 project.json），不同项目并行（save 锁序列化）；
+  busy 按项目计算（_project_busy），项目 A 跑长任务时项目 B 照常编辑/启动；
 - M6-7.6 编辑语义：人类触发的单次编辑（策划保存/参考图/分镜修改）全部走
   app/core/edits.py 同步落盘 + 按需失效下游（不走后台任务）；上传临时文件
   写项目目录、处理完即删（data/ 本地 git 不上推，历史噪声可接受）；
@@ -36,6 +39,11 @@ STATUS_COLORS = {"pending": "orange", "running": "blue", "done": "green", "faile
 
 
 # ---------------------------------------------------------------- 通用
+
+def _project_busy(pid: str) -> bool:
+    """该项目是否有运行中的后台任务（M11：busy 按项目计算，跨项目并行不互相锁）。"""
+    return (st.session_state.get("tasks") or {}).get(pid) is not None
+
 
 def _load_project(store: ProjectStore, pid: str) -> Project | None:
     """加载项目；不存在/损坏内联报错，不崩页面。"""
@@ -188,7 +196,7 @@ def _render_brief(store: ProjectStore, project: Project) -> None:
     """
     st.header("策划")
     pid = project.project_id
-    busy = st.session_state.get("task") is not None
+    busy = _project_busy(pid)
     brief = project.brief or Brief()
     if project.brief is None:
         st.info("尚未策划：填写创作简报保存后，direct 将按简报生成分镜提案（AI 是协作者，简报是你的创作输入）。")
@@ -386,20 +394,22 @@ def _render_export_output(store: ProjectStore, project: Project) -> None:
             st.download_button(f"下载 {zp.name}", f.read(), file_name=zp.name, key=f"dl_{zp.name}")
 
 
-# ---------------------------------------------------------------- 后台任务（M5）
+# ---------------------------------------------------------------- 后台任务（M5 + M11 多任务）
 
 def _start_node(store: ProjectStore, project: Project, node: str, text: str = "",
                 scene_id: str | None = None) -> None:
     """启动单节点后台任务：主脚本立即返回，worker 线程执行 pipeline。
 
     scene_id（M6-7.8）：ad-hoc 单场景操作（reroll/refine/rewrite）的目标场景。
+    M11：任务槽按项目（tasks dict）—— 同项目互斥，不同项目并行。
     """
-    if st.session_state.get("task") is not None:      # 双开兜底（按钮禁用为主防线）
-        st.warning("已有后台任务运行中，请等待完成")
+    pid = project.project_id
+    if _project_busy(pid):                            # 同项目双开兜底（按钮禁用为主防线）
+        st.warning(f"项目 {pid} 已有后台任务运行中，请等待完成")
         return
     container = tasks.start_task(store, project, node, text, scene_id=scene_id)
-    st.session_state["task"] = container
-    st.session_state.pop("task_result", None)
+    st.session_state.setdefault("tasks", {})[pid] = container
+    st.session_state.setdefault("task_results", {}).pop(pid, None)
 
 
 def _start_chain(store: ProjectStore, project: Project, text: str) -> None:
@@ -407,54 +417,62 @@ def _start_chain(store: ProjectStore, project: Project, text: str) -> None:
     if project.pipeline["confirm"] != "done":
         st.warning("分镜待确认：请到「分镜确认」页确认后，再点击一键全链路")
         return
-    if st.session_state.get("task") is not None:
-        st.warning("已有后台任务运行中，请等待完成")
+    pid = project.project_id
+    if _project_busy(pid):
+        st.warning(f"项目 {pid} 已有后台任务运行中，请等待完成")
         return
     container = tasks.start_task(store, project, "", chain=True)
-    st.session_state["task"] = container
-    st.session_state.pop("task_result", None)
+    st.session_state.setdefault("tasks", {})[pid] = container
+    st.session_state.setdefault("task_results", {}).pop(pid, None)
 
 
-@st.fragment(run_every=1.0)
-def _render_task_progress() -> None:
-    """后台任务进度轮询 UI（M5）。
+def _render_one_task(task: "tasks.TaskContainer") -> str:
+    """单个任务的进度/终态渲染（M11 从 _render_task_progress 抽出，多任务复用）。
 
-    语义（已核实 1.62）：fragment 函数体在全页 run 时内联执行，AppTest 每次
-    at.run() 都会执行；run_every 的自动重跑由前端 timer 驱动，真实运行 ~1s
-    轮询一次，测试里用 at.run() 手动驱动。
-    完成分支：先删任务再 st.rerun()（默认 scope="app"，fragment 内合法）——
-    防止下一轮全页 run 再次触发 rerun 死循环。
+    返回快照 state（消费判断用返回值，不做裸属性读）。
     """
-    task = st.session_state.get("task")
-    if task is None:
-        return
     state, events, error = task.snapshot()
     last = events[-1] if events else None
-    st.caption(f"后台任务：{task.node}")
+    st.caption(f"后台任务[{task.pid}]：{task.node}")
     if state == "running":
         if last is not None and last.percent is not None:
             st.progress(min(last.percent, 1.0), text=last.message)
         else:
             st.progress(0.0, text=last.message if last else "启动中…")
-        return                                        # 运行中：不消费、不 rerun
+        return state
     st.progress(1.0 if state == "done" else 0.0, text=last.message if last else "")
-    if state == "done":
-        st.success(f"{task.node} 完成")
-        result = (task.node, "done", "")
-    elif state == "aborted":
-        st.warning(error)
-        result = (task.node, "aborted", error)
-    else:
-        st.error(f"{task.node} 失败: {error}")
-        result = (task.node, "failed", error)
-    del st.session_state["task"]                      # 只消费一次
-    st.session_state["task_result"] = result          # 持久结果（主脚本区渲染）
-    st.rerun()                                        # scope="app"：刷新徽章/按钮/错误区
+    st.session_state.setdefault("task_results", {})[task.pid] = (
+        task.node, state, error,
+    )
+    return state
 
 
-def _render_task_result() -> None:
-    """上次后台任务的持久结果区（替代原 st.success/st.error 瞬态分支）。"""
-    result = st.session_state.get("task_result")
+@st.fragment(run_every=1.0)
+def _render_task_progress() -> None:
+    """后台任务进度轮询 UI（M5；M11 起多项目并行）。
+
+    语义（已核实 1.62）：fragment 函数体在全页 run 时内联执行，AppTest 每次
+    at.run() 都会执行；run_every 的自动重跑由前端 timer 驱动，真实运行 ~1s
+    轮询一次，测试里用 at.run() 手动驱动。
+    完成分支：全部终态任务一轮消费（只删一次、只 rerun 一次），结果写入
+    task_results[pid]；先删任务再 st.rerun()（默认 scope="app"，fragment 内
+    合法）—— 防止下一轮全页 run 再次触发 rerun 死循环。
+    """
+    running = st.session_state.get("tasks") or {}
+    if not running:
+        return
+    consumed = False
+    for pid, task in sorted(running.items()):
+        if _render_one_task(task) != "running":      # 终态：消费（只一次）
+            del running[pid]
+            consumed = True
+    if consumed:
+        st.rerun()                                    # scope="app"：刷新徽章/按钮/错误区
+
+
+def _render_task_result(pid: str) -> None:
+    """当前项目的持久结果区（M11：结果按项目隔离，串项目不串味）。"""
+    result = (st.session_state.get("task_results") or {}).get(pid)
     if not result:
         return
     node, state, error = result
@@ -466,10 +484,22 @@ def _render_task_result() -> None:
         st.error(f"{node} 失败: {error}")
 
 
+def _render_task_results_all() -> None:
+    """项目管理页的结果汇总（无当前项目概念：带 pid 标签展示全部项目结果）。"""
+    results = st.session_state.get("task_results") or {}
+    for pid, (node, state, error) in sorted(results.items()):
+        if state == "done":
+            st.success(f"[{pid}] {node} 完成")
+        elif state == "aborted":
+            st.warning(f"[{pid}] {error}")
+        else:
+            st.error(f"[{pid}] {node} 失败: {error}")
+
+
 def _render_pipeline(store: ProjectStore, project: Project) -> None:
     st.header(f"流水线 「{project.title or project.project_id}」")
     pid = project.project_id
-    busy = st.session_state.get("task") is not None
+    busy = _project_busy(pid)
     cols = st.columns(len(PIPELINE_NODES))
     for col, node in zip(cols, PIPELINE_NODES):
         status = project.pipeline[node]
@@ -594,7 +624,7 @@ def _render_storyboard(store: ProjectStore, project: Project) -> None:
     st.header("分镜确认")
     st.caption("创作者枢纽（M6 默认人审）：先确认分镜与逐镜选图，再到「流水线」页生成素材。")
     pid = project.project_id
-    busy = st.session_state.get("task") is not None      # 运行中禁改分镜：防 worker 副本覆盖
+    busy = _project_busy(pid)      # 本项目运行中禁改分镜：防 worker 副本覆盖（他项目任务不锁本页）
     if project.pipeline["confirm"] == "done":
         st.success("分镜已确认。若修改分镜，将重置为待确认，需重新确认。")
     if not project.scenes:
@@ -826,7 +856,7 @@ def main() -> None:
 
     if section == "项目管理":
         _render_projects(store)
-        _render_task_result()
+        _render_task_results_all()   # M11：无当前项目概念，汇总全部项目结果
         _render_task_progress()   # fragment 全页注册：切到项目管理页也消费任务
         return
     project = _require_project(store)
@@ -842,7 +872,8 @@ def main() -> None:
         _render_cost(project)
     # M6-7.8 起结果区 + 进度 fragment 挂在 main：ad-hoc 任务（reroll/refine/rewrite）
     # 从分镜确认页发起，进度/结果也在该页消费（进度条跨页可见）。
-    _render_task_result()
+    # M11：结果按项目隔离 —— 项目页只显当前项目的结果，他项目任务完成不串味。
+    _render_task_result(project.project_id)
     _render_task_progress()       # 注册并内联执行进度 fragment（全页放最后）
 
 
