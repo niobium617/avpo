@@ -1,6 +1,8 @@
 """测试公共设施。
 
-临时目录约定：优先 F 盘（本机免 C 盘污染），不可用则退回系统临时目录。
+临时目录约定：读 AVPO_TEST_TMP 环境变量（多个候选以 os.pathsep 分隔，按序
+尝试可创建者）；未配置或全部不可用则退回系统临时目录。公开仓库不含本机路径；
+本机想固定走某盘（如 F 盘免 C 盘污染）：`setx AVPO_TEST_TMP F:/tmp/avpo-pytest`。
 必须在任何临时目录被使用之前设置 —— tempfile 优先读 TMP/TEMP 环境变量。
 """
 
@@ -10,7 +12,8 @@ from pathlib import Path
 
 
 def _pick_tmp_root() -> Path:
-    for candidate in (Path("F:/tmp/avpo-pytest"),):
+    raw = os.environ.get("AVPO_TEST_TMP", "")
+    for candidate in (Path(p) for p in raw.split(os.pathsep) if p.strip()):
         try:
             candidate.mkdir(parents=True, exist_ok=True)
             return candidate

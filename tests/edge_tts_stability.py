@@ -8,7 +8,7 @@
     python tests/edge_tts_stability.py
 
 产物：
-- mp3 写入临时目录（同 tests/conftest.py 约定：优先 F 盘，退回系统 temp）
+- mp3 写入临时目录（同 tests/conftest.py 约定：AVPO_TEST_TMP，未设则系统 temp）
 - 汇总报告写入 tests/edge_tts_log.md（提交仓库，机器无关）
 
 定版判定：失败率 0 且时间戳全部合规 → edge-tts 定版；
@@ -74,8 +74,9 @@ class Entry:
 
 
 def _pick_tmp_root() -> Path:
-    """同 tests/conftest.py：优先 F 盘，退回系统临时目录。"""
-    for candidate in (Path("F:/tmp/avpo-pytest"),):
+    """同 tests/conftest.py：AVPO_TEST_TMP 环境变量，未配置则系统临时目录。"""
+    raw = os.environ.get("AVPO_TEST_TMP", "")
+    for candidate in (Path(p) for p in raw.split(os.pathsep) if p.strip()):
         try:
             candidate.mkdir(parents=True, exist_ok=True)
             return candidate
@@ -166,7 +167,7 @@ def render_markdown(entries: list[Entry], elapsed_s: float) -> str:
         f"- 声音：{VOICE}，rate {RATE}",
         f"- 样本：{len(entries)} 条（长度 {min(e.chars for e in entries)}~{max(e.chars for e in entries)} 字，标点/数字/英文/引号/省略号全覆盖）",
         f"- 总耗时：{elapsed_s:.0f}s（含网络请求）",
-        "- mp3 产物：测试临时目录（同 tests/conftest.py 约定），不提交",
+        "- mp3 产物：临时目录（同 tests/conftest.py 约定：AVPO_TEST_TMP，未设则系统 temp），不提交",
         "",
         "| # | 字数 | 状态 | 尝试 | 音频时长(ms) | 词数 | 首词(ms) | 尾词(ms) | 缝隙(ms) | 异常 |",
         "|---|---|---|---|---|---|---|---|---|---|",

@@ -368,7 +368,7 @@ AVPO/
 
 ```bash
 pip install -e .[dev]
-pytest                            # 测试临时文件走 F:/tmp/avpo-pytest（见 conftest.py）
+pytest                            # 测试临时目录：默认系统 temp，AVPO_TEST_TMP 可覆盖（见 conftest.py）
 pytest -m live                    # 真实链路（调用外部 API，按 .env 渠道）
 ```
 
