@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "avpo"
 version = "0.1.0"
 description = "AI 视频工作流操作系统 —— 连接剧本、AI 生成模型与剪映的智能中间层"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "pydantic==2.13.4",
@@ -27,7 +29,10 @@ dependencies = [
 avpo = "app.cli:app"
 
 [project.optional-dependencies]
-dev = ["pytest==9.1.1"]
+dev = [
+    "pytest==9.1.1",
+    "playwright==1.62.0",   # 生成 docs/screenshots/ 工作台截图（tools/screenshot_workbench.py）
+]
 
 [tool.setuptools]
 packages = ["app", "app.audio", "app.core", "app.director", "app.tts", "app.vision", "app.timeline", "app.export", "app.web"]

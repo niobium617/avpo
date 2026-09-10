@@ -1,9 +1,45 @@
 # AVPO —— AI 视频工作流操作系统
 
+**中文** | [English](README_EN.md)
+
+[![tests](https://github.com/niobium617/avpo/actions/workflows/tests.yml/badge.svg)](https://github.com/niobium617/avpo/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+
 > 连接剧本、AI 生成模型与剪映的智能中间层，消除工具间搬运与对齐。
 > 以创作者为中心：AI 是协作者/提案者，简化的是工具流程，创作决策权始终在人。
 
-**当前状态：M0~M7 全部完成（MVP 可交付 + 工作台五页 + 创作者中心 + 运镜动态化，276 测试绿）**
+**当前状态：M0~M11 全部完成 —— 一句话创意到剪映草稿的全链路打通
+（分镜 / 配音字幕 / 候选生图 / 运镜关键帧 / BGM 卡点 / 转场止损 / 本地 Whisper 字幕 /
+Streamlit 工作台多项目并行），357 测试全绿。**
+
+## 界面预览
+
+<p align="center">
+  <img src="docs/screenshots/01-projects.png" width="49%" alt="项目管理页">
+  <img src="docs/screenshots/02-brief.png" width="49%" alt="策划页（创作简报）">
+</p>
+<p align="center">
+  <img src="docs/screenshots/03-storyboard.png" width="49%" alt="分镜确认页（逐镜编辑 + 生成图 + 自带音频）">
+  <img src="docs/screenshots/04-pipeline.png" width="49%" alt="流水线页">
+</p>
+
+## 功能总览
+
+| 能力 | 说明 | 里程碑 |
+|---|---|---|
+| 一句话 → 分镜 | LLM 强制 JSON 拆解分镜，narration 逐字校验 | [M1](#mvp-工作流营销口播视频) |
+| 配音 + 字幕 | edge-tts word 时间戳聚合字幕，零成本对齐 | [M1](#mvp-工作流营销口播视频) |
+| AI 生图 + 候选画廊 | 每镜 N 张候选、人审选中、换种子重 roll、图生图精修 | [M6](#以创作者为中心m6) |
+| 策划简报 Brief | 主题/世界观/画风/参考图组/BGM 节奏，AI 按简报提案 | [M6](#以创作者为中心m6) |
+| 运镜关键帧 | zoom/pan 四类全关键帧化 + 首尾帧 0.4s 静态尾拍 | [M7](#动态化m7) |
+| 音频 | BGM 上传 + 节拍卡点对齐 + 音效切点绑定 | [M8](#音频m8) |
+| 转场止损 | 无结束帧的切点自动闪白 0.3s，可逐镜覆盖 | [M9](#转场m9) |
+| 本地字幕 | 创作者自带录音 → Whisper 本地转写（0 API 成本） | [M10](#本地字幕m10) |
+| 工作台多任务并行 | 任务槽按项目，同项目互斥、跨项目并行 | [M11](#工作台多任务并行m11) |
+| 剪映草稿导出 | pyJianYingDraft 生成明文草稿，打开即精修 | [M0](#里程碑) |
+| 断点续跑 | 状态与产物同一次 git 提交，kill -9 后 0 重复 API 调用 | [M3](#健壮性m3) |
+| 风格模板 | 运镜指导 + 字幕样式 + BGM，`templates/*.json` 可扩展 | [M3](#风格模板m3) |
 
 ## MVP 工作流（营销口播视频）
 
@@ -392,3 +428,31 @@ pytest -m live                    # 真实链路（调用外部 API，按 .env �
   多浏览器会话对同一项目并发启动任务不受 UI 守卫保护（各任务互不知晓，后存者覆盖）；
   `ProjectStore.save` 锁为进程内锁，CLI 与 Web 同时跑同一数据目录时 git 提交不互斥；
   运行中关浏览器任务继续跑完落盘，但进度条随会话丢失（重开看徽章终态）。
+
+## 文档
+
+| 文件 | 内容 |
+|---|---|
+| [EXECUTION_PLAN.md](EXECUTION_PLAN.md) | 总体方案与里程碑定义 |
+| [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | 任务拆解 |
+| [SUMMARY.md](SUMMARY.md) | 项目摘要 |
+| [docs/PROGRESS.md](docs/PROGRESS.md) | 动态开发进度（逐里程碑记录） |
+| [docs/versions.md](docs/versions.md) | 依赖钉版表与环境约定 |
+| [docs/jyd_notes.md](docs/jyd_notes.md) | 剪映草稿格式逆向笔记（pyJianYingDraft 相关） |
+
+## 参与贡献
+
+欢迎 Issue / PR。开发环境：
+
+```bash
+pip install -e .[dev]
+pytest          # 全量离线测试（live 标记默认跳过）
+pytest -m live  # 真实外部 API 链路（需 .env 渠道密钥）
+```
+
+代码风格：类型注解 + 中文 docstring（说明「为什么」），单点可调的常量集中定义并注释
+（如运镜幅度见 `app/core/motion.py`）；改动请同步测试与文档。
+
+## License
+
+[MIT](LICENSE) © 2026 niobium617
